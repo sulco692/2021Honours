@@ -1,0 +1,1957 @@
+---
+title: "Death"
+author: "Connor Sullivan"
+date: "2021"
+output: word_document
+---
+
+#Set up
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(survival)
+library(ggplot2)
+library(corrplot)
+library(stringr)
+library(tidyverse)
+library(mice)
+```
+
+Reading in important libraries.
+
+```{r}
+#Reading in ANZDATA
+master=read.csv("master.csv")
+```
+
+Reading in data from NMDS
+```{r}
+util=read.csv("util.csv")
+```
+
+Getting and formatting NMDS data so it can be added
+
+```{r}
+NMDS=data.frame(patientID=util$patient_id,
+ethnicity=recode(util$ETHNICGP,"10"="European","11"="European","12"="European", "21"="NZM", "30"="Pacific","31"="Pacific","32"="Pacific","33"="Pacific","34"="Pacific","35"="Pacific","36"="Pacific","37"="Pacific","40"="Asian","41"="Asian","42"="Asian","43"="Asian","44"="Asian" ,.default="Other"), domcodes=util$DOM_CD)
+NMDS=as.data.frame(NMDS%>%group_by(patientID)%>%filter(row_number()==1))
+```
+
+Reading in NZdep scores
+```{r}
+cau_dep=read.csv("CAU dep.csv")
+dom_census=read.csv("dom census.csv")
+
+cau_dep=data.frame(Description=cau_dep$CAU_name_2006, 
+                   nzDep2006=cau_dep$CAU_average_NZDep2006,
+                   nzDepScore2006=cau_dep$CAU_average_NZDep_score_2006)
+
+dom_census=data.frame(domcodes=dom_census$dom, Description=dom_census$Description)
+
+dom_census$domcodes=str_pad(dom_census$domcodes, 4, pad = "0")
+
+dep=full_join(cau_dep, dom_census, by="Description")
+
+#Manually setting values for typos in the joining description
+dep=dep[1:2026,]
+dep$domcodes[12]="0012"
+dep$domcodes[104]="0113"
+dep$domcodes[223]="0274"
+dep$domcodes[369]="0499"
+dep$domcodes[419]="0641"
+dep$domcodes[509]="0807"
+dep$domcodes[520]="1906"
+dep$domcodes[624]="1007"
+dep$domcodes[1026]="1640"
+dep$domcodes[1425]="2311"
+dep$domcodes[1426]="2312"
+dep$domcodes[1504]="2524"
+dep$domcodes[1534]="1122"
+dep$domcodes[1758]="2822"
+dep$domcodes[1801]="2908"
+dep$domcodes[1865]="3022"
+```
+
+```{r}
+#Creating play dataset
+ANZDATA=data.frame(patientID=master$id, 
+transplantDate=dmy(master$t0),
+lastdate=dmy(master$lastfollowupdate),
+time=master$aliveperiod,age=master$ageattransplant,male=master$gendercode,
+bmi=master$bmi, smoking=recode(master$smoking, N=0, F=1, C=1), 
+heartdisease=recode(master$coronaryarterycode, N=0, S=1, Y=1),
+lungdisease=recode(master$chroniclungcode,N=0, S=1, Y=1),
+peripheralvasc=recode(master$peripheralvascularcode,N=0, S=1, Y=1),
+cerebrovascular=recode(master$cerebrovasularcode,N=0, S=1, Y=1),
+diabetes=master$diabetescode,
+currentAntibodies=master$maxcytotoxicantibodies,
+lastTreatment=recode(master$lasttreatmentpretransplant,.default = "Haemodialysis", 
+"APD"="Peritoneal dialysis", "CAPD"="Peritoneal dialysis",
+"Pre-emptive transplant"="Pre-emptive transplant", 
+"Own Kidney Function Recovered"="Own Kidney Function Recovered"),
+dialysisTime=(as.integer(dmy(master$t0)-dmy(master$treatmentdate)))/365,
+causeESKD=master$discat,dead=master$alivestatus,
+ecd=recode(master$ecd, SCD=0, ECD=1), causeDeath=master$donorcauseofdeath,                donorAge=master$donorage,donorMale=master$donorgendercode,
+donorHeight=master$donorheight, donorWeight=master$donorweight,
+HLAmismatch=master$hlamismatch, HLA_A=master$hlamismatchesa,
+HLA_B=master$hlamismatchesb, HLA_DR=master$hlamismatchesdr, ischemicTime=master$ischaemia, 
+creat=master$creatinineterminal,KDRI=master$kdri, KDPI=master$kdpi,
+donorHeartbeat=recode(master$heartbeatingcode, N=0, Y=1),
+donorDiab=recode(master$donordiabetescode, N=0, P=1, T=1),
+donorHyper=recode(master$hypertensioncode, N=0, Y=1), 
+donorOlig=recode(master$oliguriacode, N=0, Y=1),
+transplantCentre=master$transplantcentrecodeid, dual=master$dual)
+```
+
+Combining data bases
+```{r}
+data=full_join(ANZDATA, NMDS, by="patientID")%>%full_join(dep, by="domcodes")
+data=as.data.frame(data%>%group_by(patientID)%>%filter(row_number()==1))
+data=data[-length(data$patientID),]
+```
+
+```{r}
+data=data[-which(data$transplantCentre=="H6540777"),]
+```
+
+```{r}
+data=subset(data, select = -c(domcodes, Description, patientID))
+
+data$causeESKD=recode(data$causeESKD, "Diabetic Nephropathy"="Diabetic Nephropathy", .default = "Other")
+data$diabetes=recode(data$diabetes, "N"=F, .default = T)
+
+data$causeESKD=as.factor(data$causeESKD)
+data$smoking=as.logical(data$smoking)
+data$dead=as.logical(data$dead)
+data$male=as.logical(data$male)
+data$smoking=as.logical(data$smoking)
+data$heartdisease=as.logical(data$heartdisease)
+data$lungdisease=as.logical(data$lungdisease)
+data$peripheralvasc=as.logical(data$peripheralvasc)
+data$diabetes=as.factor(data$diabetes)
+data$donorHeartbeat=as.logical(data$donorHeartbeat)
+data$cerebrovascular=as.logical(data$cerebrovascular)
+data$lastTreatment=as.factor(data$lastTreatment)
+data$HLAmismatch=as.factor(data$HLAmismatch)
+data$HLA_A=as.factor(data$HLA_A)
+data$HLA_B=as.factor(data$HLA_B)
+data$HLA_DR=as.factor(data$HLA_DR)
+data$ecd=as.logical(data$ecd)
+data$donorMale=as.logical(data$donorMale)
+data$donorOlig=as.logical(data$donorOlig)
+data$donorDiab=as.logical(data$donorDiab)
+data$donorHyper=as.logical(data$donorHyper)
+data$ethnicity=as.factor(data$ethnicity)
+data$causeDeath=as.factor(data$causeDeath)
+data$transplantCentre=as.factor(data$transplantCentre)
+data$dual=as.factor(data$dual)
+attach(data)
+```
+
+Reading in the data and setting factors as a factor rather than integers.
+
+#Basic plots
+
+```{r}
+length(data[,1])
+summary(dead)
+```
+
+In this dataset there are 1038 patients of which 32.76% died. 
+
+```{r}
+hist(time)
+```
+
+Times are positively skewed with a mode at around 1000 days.
+
+```{r}
+table(dead,ecd)
+table(dead,cut(KDRI, breaks=3))
+```
+
+The table comparing ecd and death seems to show a relationship between ecd and death as extended kidneys have a 45.0% risk of death however standard kidneys have a 30.0% risk of death. Similar as the KDRI increases (meaning higher chance of graft failure) the risk of death goes from 28.4% to 39.2% to 46.4% (however it should be noted that the last group only has a size of 28).
+
+```{r}
+mean(na.omit(KDRI[which(ecd==0)]))
+mean(na.omit(KDRI[which(ecd==1)]))
+```
+
+Also woth noting is the mean KDRI value for standard kidneys is 1.05 and the mean KDRI for extended kidneys is 1.72.
+
+```{r}
+boxplot(KDRI~ecd)
+```
+
+Looking at the boxplots it is clear that extended kidneys have much larger KDRIs.
+
+```{r}
+hist(data$KDRI, breaks=20, main = "Frequency of KDRI values", xlab="KDRI")
+summary(data$KDRI)
+
+prop.table(table(data$HLAmismatch[which(data$ecd==T)]))
+prop.table(table(data$HLAmismatch[which(data$ecd==F)]))
+```
+
+```{r}
+table(dead,cut(age, breaks=4))
+table(dead,male)
+table(dead,cut(donorAge, breaks=4))
+table(dead,cut(donorWeight, breaks=4))
+table(dead,donorMale)
+```
+
+These 6 tables compare death with age, weight and sex for the recipient and the donor. The tables which appear to have a pattern with death is recipeint age and donor age.
+
+```{r}
+par(mfrow=c(1,2))
+boxplot(age~dead)
+boxplot(donorAge~dead)
+```
+
+The box plot for recipient age shows that the median for people who died is higher than for those who are still dead. Donor age also seems to have an impact on death as the median for donor age was higher for those who died.
+
+```{r}
+boxplot(ischemicTime~dead)
+```
+
+Comparing ischemic times with deaths there does not appear a large difference. Ischemic times are slightly higher for those who died.
+
+```{r}
+table(dead,HLAmismatch)
+```
+
+Comparing HLAmismatch and death, there appears to be no pattern between them.
+
+```{r}
+data %>% ggplot(aes(x=creat, fill=dead)) + geom_histogram(alpha=0.6, bins=50)
+```
+
+This histogram is of serum creatine of the kidney being donated and it is coloured into two groups (dead or dead). There does not appear to be a difference in creatine levels between the two groups.
+
+```{r}
+table(dead,donorHeartbeat)
+```
+
+Very few people in our study had DCD (donation after cardiac death) transplants and most had DBD (donation after brain death) transplants so it will be hard to notice a difference between the two groups for the outcome of death.
+
+```{r}
+year=cut(as.numeric(format(data$transplantDate, "%Y")), 
+                            breaks = c(-Inf,2002.5,2007.5,2012.5,Inf),
+                            labels=c("1997-2002", "2003-2007", "2008-2012", "2013-2016"))
+plot(KDRI, KDPI, col=year, main = "KDRI against KDPI coloured by transplant year")
+legend("bottomright", c("1997-2002", "2003-2007", "2008-2012", "2013-2016"), pch=1, col=1:4)
+```
+
+#Kaplan Meier
+
+```{r}
+#Creating survival object
+surv_kidney=Surv(data$time, as.integer(dead))
+```
+
+Creating the survival object in R. This is done by noting which times are censored.
+
+```{r}
+km_null=survfit(surv_kidney~1)
+plot(km_null)
+```
+
+This plot is just the basic plot of the survival function.
+
+```{r}
+km_ecd=survfit(surv_kidney~ecd)
+plot(km_ecd, conf.int = T, col=1:2, lty=1, main="Kaplan-Meier Curve for SCD and ECD donors", xlab="Time (Days)", ylab="Survival Function")
+legend("topright", legend=c("Standard", "Extended"), lty=1, col=1:2)
+```
+
+This is the kaplan meier curve comparing the survival curve for standard and extended kidneys. The surival curve for extended kidneys is lower than the curve for extended kidneys and both are completely seperated between their 95% confidence intervals.
+
+```{r}
+km_KDRI=survfit(surv_kidney~cut(KDRI, breaks = c(-Inf, 1.5, Inf)))
+plot(km_KDRI, conf.int = T, col=1:2, lty=1, main="Kaplan-Meier Curve for KDRI model", xlab="Time (Days)", ylab="Survival Function")
+legend("topright", legend=c("KDRI<1.5", "KDRI>1.5"), lty=1, col=1:2)
+```
+
+This is the kaplan meier curve comparing the survival curve for KDRIs below 1.65 and KDRIs above 1.65. The surival curve for high KDRIs is lower than the curve low KDRIs and both are completely seperated between their 95% confidence intervals.
+
+```{r}
+km_KDPI=survfit(surv_kidney~cut(KDPI, breaks = c(-Inf, 85, Inf)))
+plot(km_KDPI, conf.int = T, col=1:2, lty=1, main="Kaplan-Meier Curve for model KDPI", xlab="Time (Days)", ylab="Survival Function")
+legend("topright", legend=c("KDPI<=85%", "KDRI>85%"), lty=1, col=1:2)
+```
+
+#Univariate
+
+```{r}
+null_ecd=coxph(surv_kidney ~ 1)
+null.rr=null_ecd$residuals
+```
+
+```{r}
+#Cox regression with ecd as explanatory variable
+ecd_cox=coxph(surv_kidney~ecd)
+summary(ecd_cox)
+```
+
+This is a cox regression with the explanatory variable being the type of donated kidney (being standard or extended) and death being the outcome. The exponential of the coefficient is 2.1803 which indicates that the hazard ratio of death is 2.1803 times larger for an extended kidney compared to a standard kidney. This is significant to 95% significance level with a p-value less than 0.05. The 95% confidence interval for this coefficient is between 1.706 and 2.787. 
+
+In the exploratory analysis there was noticeable difference in age and donor age between the dead group and the dead group.
+
+```{r}
+plot(ecd[which(!is.na(ecd))],ecd_cox$residuals)
+lines(smooth.spline(ecd_cox$residuals,ecd[which(!is.na(ecd))], spar=0.9))
+
+ecd_dfbeta=residuals(ecd_cox, type="dfbeta")
+plot(seq(from=1,length(ecd_dfbeta)),ecd_dfbeta, type="h",main="Delta-beta values for ECD model", xlab="Patient Index", ylab="Delta-beta")
+abline(h=0)
+```
+No obvious pattern, possibly slight quadratic nature but nothing serious. Always uses martingale residuals.
+
+Possibly a bit of heteroscadisticy.
+
+```{r}
+ecdSurv=survfit(surv_kidney~ecd)
+plot(log(ecdSurv$time),log(ecdSurv$cumhaz))
+
+ecdScho <- cox.zph(ecd_cox, transform="km")
+plot(ecdScho,main="Schoenfeld Residuals of ECD model")
+ecdScho
+```
+
+```{r}
+attach(data)
+ecd_time_cox=coxph(surv_kidney~ecd+tt(ecd), tt=function(x, t, ...) x*t)
+summary(ecd_time_cox)
+```
+
+```{r}
+plot(ecdScho, main="Schoenfeld Residuals of ECD model")
+abline(h=coef(ecd_cox), col=2)
+x=seq(-0.1,0.7, length.out=1000)
+c=coef(ecd_time_cox)
+lines(x, c[1]+x*10000*c[2], col=3)
+legend("right", c("Without time dependency", "With time dependency"), lty=1 , col=2:3, cex = 0.75)
+```
+
+```{r}
+AIC(ecd_cox)
+AIC(ecd_time_cox)
+```
+
+
+```{r}
+#Cox regression with KDRI
+KDRI_cox=coxph(surv_kidney~KDRI)
+summary(KDRI_cox)
+```
+
+```{r}
+plot(KDRI[which(!is.na(KDRI))],KDRI_cox$residuals)
+lines(smooth.spline(KDRI[which(!is.na(KDRI))],KDRI_cox$residuals), col="red")
+abline(h=0)
+
+plot(KDRI,null.rr, main="KDRI against the Martingale residuals for the null model", ylab="Martingale residuals")
+lines(smooth.spline(KDRI[which(!is.na(KDRI))],null.rr[which(!is.na(KDRI))]), col="red")
+abline(h=0)
+
+KDRI_dfbeta=residuals(KDRI_cox, type="dfbeta")
+plot(1:length(KDRI_dfbeta), KDRI_dfbeta)
+abline(h=0)
+```
+
+Checking non-linearity
+
+```{r}
+KDRI_pspline=coxph(surv_kidney~pspline(KDRI, nterm = 4))
+summary(KDRI_pspline)
+anova(KDRI_pspline, KDRI_cox, test = "chisq")
+```
+
+```{r}
+KDRISurv=survfit(surv_kidney~cut(KDRI, breaks=4))
+plot(log(KDRISurv$time), log(KDRISurv$cumhaz))
+
+KDRIScho <- cox.zph(KDRI_cox, transform="km")
+plot(KDRIScho)
+```
+
+```{r}
+KDRI_time_cox=coxph(surv_kidney~KDRI+tt(KDRI))
+summary(KDRI_time_cox)
+```
+
+```{r}
+#Cox regression with KDPI
+KDPI_cox=coxph(surv_kidney~KDPI>85)
+summary(KDPI_cox)
+```
+
+```{r}
+plot(KDPI[which(!is.na(KDPI))],KDPI_cox$residuals)
+lines(smooth.spline(KDPI[which(!is.na(KDPI))],KDPI_cox$residuals), col="red")
+abline(h=0)
+
+plot(KDPI,null.rr)
+lines(smooth.spline(KDPI[which(!is.na(KDPI))],null.rr[which(!is.na(KDPI))]), col="red")
+abline(h=0)
+
+KDPI_dfbeta=residuals(KDPI_cox, type="dfbeta")
+plot(1:length(KDPI_dfbeta), KDPI_dfbeta)
+abline(h=0)
+```
+
+Checking non-linearity
+
+```{r}
+KDPI_pspline=coxph(surv_kidney~pspline(KDPI, nterm = 4))
+summary(KDPI_pspline)
+anova(KDPI_pspline, KDPI_cox, test = "chisq")
+```
+
+KDPI appears to be non-linear
+
+```{r}
+kdpiSurv=survfit(surv_kidney~cut(KDPI, breaks=4))
+plot(log(kdpiSurv$time), log(kdpiSurv$cumhaz))
+
+kdpiScho <- cox.zph(KDPI_cox, transform="km")
+plot(kdpiScho)
+```
+
+```{r}
+#Cox regression with age as explanatory variable
+age_cox=coxph(surv_kidney~age)
+summary(age_cox)
+```
+
+Age is highly significant with a coef of 0.053225
+
+```{r}
+plot(age, age_cox$residuals, main = "Martingale residuals for age model", ylab="Martingale residuals")
+lines(smooth.spline(age, age_cox$residuals, spar=0.8))
+
+plot(age, null.rr, main = "Martingale residuals for null model", ylab="Martingale residuals")
+lines(smooth.spline(age, null.rr, spar=0.8))
+
+age_dfbeta=residuals(age_cox, type="dfbeta")
+plot(1:length(age_dfbeta), age_dfbeta)
+abline(h=0)
+```
+
+Large amounts of heteroscadisity.
+
+
+```{r}
+ageSurv=survfit(surv_kidney~cut(age, breaks=4))
+plot(log(ageSurv$time), log(ageSurv$cumhaz), main="Log-cummulative hazard plot for age model", ylab="Log-cummulative hazard", xlab="Time (log days)")
+
+ageScho <- cox.zph(age_cox, transform="km")
+plot(ageScho, main="Shcoenfeld residuals for age model")
+```
+
+```{r}
+#Cox regression with age as pspline, doesn't help
+ageP_cox=coxph(surv_kidney~pspline(age))
+summary(ageP_cox)
+anova(ageP_cox, age_cox)
+```
+
+```{r}
+#Cox regression with male
+male_cox=coxph(surv_kidney~male)
+summary(male_cox)
+```
+
+```{r}
+plot(male,male_cox$residuals)
+
+male_dfbeta=residuals(male_cox, type="dfbeta")
+plot(1:length(male_dfbeta),male_dfbeta)
+abline(h=0)
+```
+
+```{r}
+maleSurv=survfit(surv_kidney~male)
+plot(log(maleSurv$time), log(maleSurv$cumhaz))
+
+maleScho <- cox.zph(male_cox, transform="km")
+plot(maleScho)
+```
+
+```{r}
+#Cox model with ethnicity
+ethnic_cox=coxph(surv_kidney~ethnicity)
+summary(ethnic_cox)
+```
+
+```{r}
+plot(ethnicity, null.rr)
+
+ethnicity_dfbeta=residuals(ethnic_cox, type="dfbeta")
+plot(1:length(ethnicity_dfbeta),ethnicity_dfbeta, type="h", ylab="Delta-Beta", xlab = "Index", main="Delta-Beta plot for ethnicity model")
+abline(h=0)
+```
+
+
+```{r}
+ethnicitySurv=survfit(surv_kidney~ethnicity)
+plot(log(ethnicitySurv$time), log(ethnicitySurv$cumhaz))
+plot(log(ethnicitySurv$time), log(ethnicitySurv$cumhaz), ylim=c(-3,0))
+
+ethnicScho <- cox.zph(ethnic_cox, transform="km")
+plot(ethnicScho)
+```
+
+
+Cox regression with causeESKD
+```{r}
+ESKD_cox=coxph(surv_kidney~causeESKD)
+summary(ESKD_cox)
+```
+
+```{r}
+plot(causeESKD, null.rr)
+
+plot(causeESKD, ESKD_cox$residuals)
+
+causeESKD_dfbeta=residuals(ESKD_cox, type="dfbeta")
+plot(1:length(causeESKD_dfbeta),causeESKD_dfbeta)
+abline(h=0)
+```
+
+```{r}
+ESKD_surv=survfit(surv_kidney~causeESKD)
+plot(log(ESKD_surv$time), log(ESKD_surv$cumhaz))
+
+ESKDScho <- cox.zph(ESKD_cox, transform="km")
+plot(ESKDScho)
+```
+
+
+Cox regression with nzdep
+```{r}
+nzdep_cox=coxph(surv_kidney~nzDep2006)
+summary(nzdep_cox)
+```
+
+```{r}
+plot(nzDep2006, null.rr)
+
+plot(nzDep2006[which(!is.na(nzDep2006))], nzdep_cox$residuals)
+
+nzdep_dfbeta=residuals(nzdep_cox, type="dfbeta")
+plot(1:length(nzdep_dfbeta),nzdep_dfbeta)
+abline(h=0)
+```
+
+```{r}
+nzdep_surv=survfit(surv_kidney~nzDep2006)
+plot(log(nzdep_surv$time), log(nzdep_surv$cumhaz))
+
+NZdepScho <- cox.zph(nzdep_cox, transform="km")
+plot(NZdepScho)
+```
+
+Cox regression with BMI
+```{r}
+bmi_cox=coxph(surv_kidney~bmi)
+summary(bmi_cox)
+```
+
+```{r}
+plot(bmi[which(!is.na(bmi))], null.rr[which(!is.na(bmi))], main="BMI against the Martingale residuals for the null model", ylab="Martingale residuals", xlab="BMI")
+lines(smooth.spline(bmi[which(!is.na(bmi))], null.rr[which(!is.na(bmi))], spar=1.3), col="red")
+abline(h=0)
+
+plot(bmi[which(!is.na(bmi))], bmi_cox$residuals)
+
+bmi_dfbeta=residuals(bmi_cox, type="dfbeta")
+plot(1:length(bmi_dfbeta),bmi_dfbeta)
+abline(h=0)
+```
+
+```{r}
+bmi_surv=survfit(surv_kidney~cut(bmi, breaks = 3))
+plot(log(bmi_surv$time), log(bmi_surv$cumhaz), main = "Log-cumulative hazard plot for BMI model", xlab="Log-time", ylab = "Log-cumulative hazard")
+
+BMIScho <- cox.zph(bmi_cox, transform="km")
+plot(BMIScho, main = "Schoenfeld residuals for BMI model", ylab = "Schoenfeld residuals")
+```
+
+Cox regression with smoking
+```{r}
+smoke_cox=coxph(surv_kidney~smoking)
+summary(smoke_cox)
+```
+
+```{r}
+plot(smoking, null.rr)
+
+plot(smoking[which(!is.na(smoking))], smoke_cox$residuals)
+
+smoke_dfbeta=residuals(smoke_cox, type="dfbeta")
+plot(1:length(smoke_dfbeta),smoke_dfbeta)
+abline(h=0)
+```
+
+```{r}
+smoke_surv=survfit(surv_kidney~smoking)
+plot(log(smoke_surv$time), log(smoke_surv$cumhaz))
+
+smokeScho <- cox.zph(smoke_cox, transform="km")
+plot(smokeScho)
+```
+
+Cox regression with ischemic heart disease
+```{r}
+heartd_cox=coxph(surv_kidney~heartdisease)
+summary(heartd_cox)
+```
+
+```{r}
+plot(heartdisease, null.rr)
+
+plot(heartdisease, heartd_cox$residuals)
+
+heartd_dfbeta=residuals(heartd_cox, type="dfbeta")
+plot(1:length(heartd_dfbeta),heartd_dfbeta)
+abline(h=0)
+```
+
+```{r}
+heartd_surv=survfit(surv_kidney~heartdisease)
+plot(log(heartd_surv$time), log(heartd_surv$cumhaz))
+
+heartdScho <- cox.zph(heartd_cox, transform="km")
+plot(heartdScho)
+```
+
+Cox regression with Peripheral vascular disease 
+```{r}
+vasc_cox=coxph(surv_kidney~peripheralvasc)
+summary(vasc_cox)
+```
+
+```{r}
+plot(peripheralvasc, null.rr)
+
+plot(peripheralvasc[which(!is.na(peripheralvasc))], vasc_cox$residuals)
+
+vasc_dfbeta=residuals(vasc_cox, type="dfbeta")
+plot(1:length(vasc_dfbeta),vasc_dfbeta)
+abline(h=0)
+```
+
+```{r}
+vasc_surv=survfit(surv_kidney~peripheralvasc)
+plot(log(vasc_surv$time), log(vasc_surv$cumhaz))
+
+vascScho <- cox.zph(vasc_cox, transform="km")
+plot(vascScho)
+```
+
+Cox regression with diabetes
+```{r}
+diab_cox=coxph(surv_kidney~diabetes)
+summary(diab_cox)
+```
+
+```{r}
+plot(diabetes,null.rr)
+
+plot(diabetes, diab_cox$residuals)
+
+diab_dfbeta=residuals(diab_cox, type="dfbeta")
+plot(1:length(diab_dfbeta),diab_dfbeta)
+abline(h=0)
+```
+
+```{r}
+diab_surv=survfit(surv_kidney~diabetes)
+plot(log(diab_surv$time), log(diab_surv$cumhaz))
+
+diabScho <- cox.zph(diab_cox, transform="km")
+plot(diabScho)
+```
+
+Cox regression with cerebrovascular
+```{r}
+cereb_cox=coxph(surv_kidney~cerebrovascular)
+summary(cereb_cox)
+```
+
+```{r}
+plot(cerebrovascular,null.rr)
+
+plot(cerebrovascular, cereb_cox$residuals)
+
+cereb_dfbeta=residuals(cereb_cox, type="dfbeta")
+plot(1:length(cereb_dfbeta),cereb_dfbeta)
+abline(h=0)
+```
+
+```{r}
+cereb_surv=survfit(surv_kidney~cerebrovascular)
+plot(log(cereb_surv$time), log(cereb_surv$cumhaz))
+
+cerebScho <- cox.zph(cereb_cox, transform="km")
+plot(cerebScho)
+```
+
+Cox regression with lung disease
+```{r}
+lung_cox=coxph(surv_kidney~lungdisease)
+summary(lung_cox)
+```
+
+```{r}
+plot(lungdisease,null.rr)
+
+plot(lungdisease, lung_cox$residuals)
+
+lung_dfbeta=residuals(lung_cox, type="dfbeta")
+plot(1:length(lung_dfbeta),lung_dfbeta)
+abline(h=0)
+```
+
+```{r}
+lung_surv=survfit(surv_kidney~lungdisease)
+plot(log(lung_surv$time), log(lung_surv$cumhaz))
+
+lungScho <- cox.zph(lung_cox, transform="km")
+plot(lungScho)
+```
+
+Cox regression with dialysis
+```{r}
+dialysis_cox=coxph(surv_kidney~dialysisTime)
+summary(dialysis_cox)
+```
+
+```{r}
+plot(dialysisTime[which(!is.na(dialysisTime))], null.rr[which(!is.na(dialysisTime))], main="Time on dialysis against the Martingale residuals for the null", ylab="Martingale residuals", xlab="Time on dialysis")
+lines(smooth.spline(dialysisTime[which(!is.na(dialysisTime))], null.rr[which(!is.na(dialysisTime))], spar=1.4), col="red")
+abline(h=0)
+
+plot(dialysisTime, dialysis_cox$residuals)
+
+dialysis_dfbeta=residuals(dialysis_cox, type="dfbeta")
+plot(1:length(dialysis_dfbeta),dialysis_dfbeta)
+abline(h=0)
+```
+
+```{r}
+dialysis_surv=survfit(surv_kidney~cut(dialysisTime, breaks = 3))
+plot(log(dialysis_surv$time), log(dialysis_surv$cumhaz))
+
+dialysisScho <- cox.zph(dialysis_cox, transform="km")
+plot(dialysisScho)
+```
+
+Cox regression with last treatment
+```{r}
+lastTreat_cox=coxph(surv_kidney~lastTreatment)
+summary(lastTreat_cox)
+```
+
+```{r}
+plot(lastTreatment,null.rr)
+
+plot(lastTreatment, lastTreat_cox$residuals)
+
+lastTreat_dfbeta=residuals(lastTreat_cox, type="dfbeta")
+plot(1:length(lastTreat_dfbeta),lastTreat_dfbeta)
+abline(h=0)
+```
+
+```{r}
+lastTreat_surv=survfit(surv_kidney~lastTreatment)
+plot(log(lastTreat_surv$time), log(lastTreat_surv$cumhaz))
+
+lastTreatScho <- cox.zph(lastTreat_cox, transform="km")
+plot(lastTreatScho)
+```
+
+Cox regression with ischemic time
+```{r}
+ischemic_cox=coxph(surv_kidney~ischemicTime)
+summary(ischemic_cox)
+```
+
+```{r}
+plot(ischemicTime,null.rr)
+
+plot(ischemicTime[which(!is.na(ischemicTime))], ischemic_cox$residuals)
+
+ischemic_dfbeta=residuals(ischemic_cox, type="dfbeta")
+plot(1:length(ischemic_dfbeta),ischemic_dfbeta)
+abline(h=0)
+```
+
+```{r}
+ischemic_surv=survfit(surv_kidney~cut(ischemicTime, breaks = 3))
+plot(log(ischemic_surv$time), log(ischemic_surv$cumhaz))
+
+ischemicScho <- cox.zph(ischemic_cox, transform="km")
+plot(ischemicScho)
+```
+
+Cox regression with HLA-A
+```{r}
+HLA_A_cox=coxph(surv_kidney~HLA_A)
+summary(HLA_A_cox)
+```
+
+```{r}
+plot(HLA_A,null.rr)
+
+plot(HLA_A[which(!is.na(HLA_A))], HLA_A_cox$residuals)
+
+HLA_A_dfbeta=residuals(HLA_A_cox, type="dfbeta")
+plot(1:length(HLA_A_dfbeta),HLA_A_dfbeta)
+abline(h=0)
+```
+
+```{r}
+HLA_A_surv=survfit(surv_kidney~HLA_A)
+plot(log(HLA_A_surv$time), log(HLA_A_surv$cumhaz))
+
+HLA_AScho <- cox.zph(HLA_A_cox, transform="km")
+plot(HLA_AScho)
+```
+
+Cox regression with HLA-B
+```{r}
+HLA_B_cox=coxph(surv_kidney~HLA_B)
+summary(HLA_B_cox)
+```
+
+```{r}
+plot(HLA_B,null.rr)
+
+plot(HLA_B[which(!is.na(HLA_B))], HLA_B_cox$residuals)
+
+HLA_B_dfbeta=residuals(HLA_B_cox, type="dfbeta")
+plot(1:length(HLA_B_dfbeta),HLA_B_dfbeta)
+abline(h=0)
+```
+
+```{r}
+HLA_B_surv=survfit(surv_kidney~HLA_B)
+plot(log(HLA_B_surv$time), log(HLA_B_surv$cumhaz))
+
+HLA_BScho <- cox.zph(HLA_B_cox, transform="km")
+plot(HLA_BScho)
+```
+
+Cox regression with HLA-DR
+```{r}
+HLA_DR_cox=coxph(surv_kidney~HLA_DR)
+summary(HLA_DR_cox)
+```
+
+```{r}
+plot(HLA_DR,null.rr)
+
+plot(HLA_DR[which(!is.na(HLA_DR))], HLA_DR_cox$residuals)
+
+HLA_DR_dfbeta=residuals(HLA_DR_cox, type="dfbeta")
+plot(1:length(HLA_DR_dfbeta),HLA_DR_dfbeta)
+abline(h=0)
+```
+
+```{r}
+HLA_DR_surv=survfit(surv_kidney~HLA_DR)
+plot(log(HLA_DR_surv$time), log(HLA_DR_surv$cumhaz))
+
+HLA_DRScho <- cox.zph(HLA_DR_cox, transform="km")
+plot(HLA_DRScho)
+```
+
+Cox regression with antibodies
+```{r}
+antibodies_cox=coxph(surv_kidney~currentAntibodies)
+summary(antibodies_cox)
+```
+
+```{r}
+plot(currentAntibodies,null.rr)
+
+plot(currentAntibodies[which(!is.na(currentAntibodies))], antibodies_cox$residuals)
+
+antibodies_dfbeta=residuals(antibodies_cox, type="dfbeta")
+plot(1:length(antibodies_dfbeta),antibodies_dfbeta)
+abline(h=0)
+```
+
+```{r}
+antibodies_surv=survfit(surv_kidney~cut(currentAntibodies, breaks=3))
+plot(log(antibodies_surv$time), log(antibodies_surv$cumhaz))
+
+antibodiesScho <- cox.zph(antibodies_cox, transform="km")
+plot(antibodiesScho)
+```
+
+Cox regression with donor age
+```{r}
+donorAge_cox=coxph(surv_kidney~donorAge)
+summary(donorAge_cox)
+```
+
+```{r}
+plot(donorAge,null.rr)
+
+plot(donorAge[which(!is.na(donorAge))], donorAge_cox$residuals)
+
+donorAge_dfbeta=residuals(donorAge_cox, type="dfbeta")
+plot(1:length(donorAge_dfbeta),donorAge_dfbeta)
+abline(h=0)
+```
+
+```{r}
+donorAge_surv=survfit(surv_kidney~cut(donorAge, breaks=3))
+plot(log(donorAge_surv$time), log(donorAge_surv$cumhaz))
+
+donorAgeScho <- cox.zph(donorAge_cox, transform="km")
+plot(donorAgeScho)
+```
+
+Cox regression with donor male
+```{r}
+donorMale_cox=coxph(surv_kidney~donorMale)
+summary(donorMale_cox)
+```
+
+```{r}
+plot(donorMale,null.rr)
+
+plot(donorMale[which(!is.na(donorMale))], donorMale_cox$residuals)
+
+donorMale_dfbeta=residuals(donorMale_cox, type="dfbeta")
+plot(1:length(donorMale_dfbeta),donorMale_dfbeta)
+abline(h=0)
+```
+
+```{r}
+donorMale_surv=survfit(surv_kidney~donorMale)
+plot(log(donorMale_surv$time), log(donorMale_surv$cumhaz))
+
+donorMaleScho <- cox.zph(donorMale_cox, transform="km")
+plot(donorMaleScho)
+```
+
+Cox regression with donor diabetes
+```{r}
+donorDiab_cox=coxph(surv_kidney~donorDiab)
+summary(donorDiab_cox)
+```
+
+```{r}
+plot(donorDiab,null.rr)
+
+plot(donorDiab[which(!is.na(donorDiab))], donorDiab_cox$residuals)
+
+donorDiab_dfbeta=residuals(donorDiab_cox, type="dfbeta")
+plot(1:length(donorDiab_dfbeta),donorDiab_dfbeta)
+abline(h=0)
+```
+
+```{r}
+donorDiab_surv=survfit(surv_kidney~donorDiab)
+plot(log(donorDiab_surv$time), log(donorDiab_surv$cumhaz))
+
+donorDiabScho <- cox.zph(donorDiab_cox, transform="km")
+plot(donorDiabScho)
+```
+
+Cox regression with donor hypertension
+```{r}
+donorHyper_cox=coxph(surv_kidney~donorHyper)
+summary(donorHyper_cox)
+```
+
+```{r}
+plot(donorHyper,null.rr)
+
+plot(donorHyper[which(!is.na(donorHyper))], donorHyper_cox$residuals)
+
+donorHyper_dfbeta=residuals(donorHyper_cox, type="dfbeta")
+plot(1:length(donorHyper_dfbeta),donorHyper_dfbeta)
+abline(h=0)
+```
+
+```{r}
+donorHyper_surv=survfit(surv_kidney~donorHyper)
+plot(log(donorHyper_surv$time), log(donorHyper_surv$cumhaz))
+
+donorHyperScho <- cox.zph(donorHyper_cox, transform="km")
+plot(donorHyperScho)
+```
+
+Cox regression with donor creatine
+```{r}
+donorCreat_cox=coxph(surv_kidney~creat)
+summary(donorCreat_cox)
+```
+
+```{r}
+plot(creat,null.rr)
+
+plot(creat[which(!is.na(creat))], donorCreat_cox$residuals)
+
+donorCreat_dfbeta=residuals(donorCreat_cox, type="dfbeta")
+plot(1:length(donorCreat_dfbeta),donorCreat_dfbeta)
+abline(h=0)
+```
+
+```{r}
+donorCreat_surv=survfit(surv_kidney~cut(creat, breaks=3))
+plot(log(donorCreat_surv$time), log(donorCreat_surv$cumhaz))
+
+donorCreatScho <- cox.zph(donorCreat_cox, transform="km")
+plot(donorCreatScho)
+```
+
+Cox regression with donor Oliguria
+```{r}
+donorOlig_cox=coxph(surv_kidney~donorOlig)
+summary(donorOlig_cox)
+```
+
+```{r}
+plot(donorOlig,null.rr)
+
+plot(donorOlig[which(!is.na(donorOlig))], donorOlig_cox$residuals)
+
+donorOlig_dfbeta=residuals(donorOlig_cox, type="dfbeta")
+plot(1:length(donorOlig_dfbeta),donorOlig_dfbeta)
+abline(h=0)
+```
+
+```{r}
+donorOlig_surv=survfit(surv_kidney~donorOlig)
+plot(log(donorOlig_surv$time), log(donorOlig_surv$cumhaz))
+
+donorOligScho <- cox.zph(donorOlig_cox, transform="km")
+plot(donorOligScho)
+```
+
+Cox regression with DCD/DBD
+```{r}
+donorHeartbeat_cox=coxph(surv_kidney~donorHeartbeat)
+summary(donorHeartbeat_cox)
+```
+
+```{r}
+plot(donorHeartbeat,null.rr)
+
+plot(donorHeartbeat[which(!is.na(donorHeartbeat))], donorHeartbeat_cox$residuals)
+
+donorHeartbeat_dfbeta=residuals(donorHeartbeat_cox, type="dfbeta")
+plot(1:length(donorHeartbeat_dfbeta),donorHeartbeat_dfbeta)
+abline(h=0)
+```
+
+```{r}
+donorHeartbeat_surv=survfit(surv_kidney~donorHeartbeat)
+plot(log(donorHeartbeat_surv$time), log(donorHeartbeat_surv$cumhaz))
+
+donorHeartbeatScho <- cox.zph(donorHeartbeat_cox, transform="km")
+plot(donorHeartbeatScho)
+```
+
+Cox regression with donor cause of death
+```{r}
+donorCauseDeath_cox=coxph(surv_kidney~causeDeath)
+summary(donorCauseDeath_cox)
+```
+
+```{r}
+plot(causeDeath,null.rr)
+
+plot(causeDeath[which(!is.na(causeDeath))], donorCauseDeath_cox$residuals)
+
+donorCauseDeath_dfbeta=residuals(donorCauseDeath_cox, type="dfbeta")
+plot(1:length(donorCauseDeath_dfbeta),donorCauseDeath_dfbeta)
+abline(h=0)
+```
+
+```{r}
+donorCauseDeath_surv=survfit(surv_kidney~causeDeath)
+plot(log(donorCauseDeath_surv$time), log(donorCauseDeath_surv$cumhaz))
+
+donorCauseDScho <- cox.zph(donorCauseDeath_cox, transform="km")
+plot(donorCauseDScho)
+```
+
+Cox regression with number of kidneys transplanted
+```{r}
+dual_cox=coxph(surv_kidney~dual)
+summary(dual_cox)
+```
+
+```{r}
+plot(dual,null.rr)
+
+plot(dual[which(!is.na(dual))], dual_cox$residuals)
+
+dual_dfbeta=residuals(dual_cox, type="dfbeta")
+plot(1:length(dual_dfbeta),dual_dfbeta)
+abline(h=0)
+```
+
+```{r}
+dual_surv=survfit(surv_kidney~dual)
+plot(log(dual_surv$time), log(dual_surv$cumhaz))
+
+dualScho <- cox.zph(dual_cox, transform="km")
+plot(dualScho)
+```
+
+Cox regression with number of transplant centre code
+```{r}
+transplantCentre_cox=coxph(surv_kidney~transplantCentre)
+summary(transplantCentre_cox)
+```
+
+```{r}
+plot(transplantCentre,null.rr)
+
+plot(transplantCentre[which(!is.na(transplantCentre))], transplantCentre_cox$residuals)
+
+transplantCentre_dfbeta=residuals(transplantCentre_cox, type="dfbeta")
+plot(1:length(transplantCentre_dfbeta),transplantCentre_dfbeta)
+abline(h=0)
+```
+
+```{r}
+transplantCentre_surv=survfit(surv_kidney~transplantCentre)
+plot(log(transplantCentre_surv$time), log(transplantCentre_surv$cumhaz))
+
+transplantCentreScho <- cox.zph(transplantCentre_cox, transform="km")
+plot(transplantCentreScho)
+```
+
+Cox regression with number of transplant year
+```{r}
+data$transplantYear=cut(as.numeric(format(data$transplantDate, "%Y")), 
+                            breaks = c(-Inf,2002.5,2007.5,2012.5,Inf),
+                            labels=c("1997-2002", "2003-2007", "2008-2012", "2013-2016"))
+
+detach(data)
+attach(data)
+
+transplantYear_cox=coxph(surv_kidney~transplantYear)
+summary(transplantYear_cox)
+```
+
+```{r}
+plot(transplantYear,null.rr)
+
+plot(transplantYear[which(!is.na(transplantYear))], transplantYear_cox$residuals)
+
+transplantYear_dfbeta=residuals(transplantYear_cox, type="dfbeta")
+plot(1:length(transplantYear_dfbeta),transplantYear_dfbeta)
+abline(h=0)
+```
+
+```{r}
+transplantYear_surv=survfit(surv_kidney~transplantYear)
+plot(log(transplantYear_surv$time), log(transplantYear_surv$cumhaz))
+
+transplantYearScho <- cox.zph(transplantYear_cox, transform="km")
+plot(transplantYearScho)
+```
+
+```{r}
+data$transplantYear=NULL
+```
+
+#Imputing data
+
+First I must impute the data
+```{r}
+imp_data=subset(data, select = -c(transplantDate, lastdate, HLA_A, HLA_B, HLA_DR, time))
+
+imp_data$ethnicity=recode(imp_data$ethnicity, "NZM"="NZM", "Pacific"="Pacific", .default = "Non-Maori/Non-Pacific")
+imp_data$lastTreatment=recode(imp_data$lastTreatment, "Haemodialysis"="Haemodialysis", "Peritoneal dialysis"="Peritoneal dialysis", .default = "Pre-emptive transplant")
+imp_data$nzDep2006=cut(imp_data$nzDep2006,breaks=c(-Inf, 5.5, 8.5, Inf), labels=c("1-5","6-8","9-10"))
+imp_data$transplantYear=cut(as.numeric(format(data$transplantDate, "%Y")), 
+                            breaks = c(-Inf,2002.5,2007.5,2012.5,Inf),
+                            labels=c("1997-2002", "2003-2007", "2008-2012", "2013-2016"))
+imp_data$causeESKD=recode(imp_data$causeESKD, "Not reported"="Unknown", "Uncertain"="Unknown")
+
+imp=mice(imp_data, m=5, maxit=20, seed=1, print=FALSE)
+```
+
+```{r}
+plot(imp, c("KDRI", "KDPI", "creat"))
+
+xyplot(imp, KDPI ~ KDRI)
+```
+
+
+Attach imputation model
+```{r}
+detach(data)
+attach(imp)
+```
+
+Making a complete cases dataset for comparison
+
+```{r}
+data_complete=data[complete.cases(data),]
+
+data_complete$ethnicity=recode(data_complete$ethnicity, "NZM"="NZM", "Pacific"="Pacific", .default = "Non-Maori/Non-Pacific")
+data_complete$lastTreatment=recode(data_complete$lastTreatment, "Haemodialysis"="Haemodialysis", "Peritoneal dialysis"="Peritoneal dialysis", .default = "Pre-emptive transplant")
+data_complete$nzDep2006=cut(data_complete$nzDep2006,breaks=c(-Inf, 5.5, 8.5, Inf), labels=c("1-5","6-8","9-10"))
+data_complete$transplantYear=cut(as.numeric(format(data_complete$transplantDate, "%Y")), 
+                            breaks = c(-Inf,2002.5,2007.5,2012.5,Inf),
+                            labels=c("1997-2002", "2003-2007", "2008-2012", "2013-2016"))
+data_complete$causeESKD=recode(data_complete$causeESKD, "Not reported"="Unknown", "Uncertain"="Unknown")
+
+surv_kidney_complete=Surv(data_complete$time, as.integer(data_complete$dead))
+```
+
+#Full model - ECD
+
+```{r}
+full.cox_ECD=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+summary(pool(full.cox_ECD))
+```
+
+Remove Antibodies
+```{r}
+ECD_mEthnicity=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+ECD_mHLA=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+ECD_mAntibodies=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+D1(full.cox_ECD,ECD_mEthnicity)
+D1(full.cox_ECD,ECD_mHLA)
+D1(full.cox_ECD,ECD_mAntibodies)
+summary(pool(ECD_mAntibodies))
+```
+
+Remove HLA
+```{r}
+ECD_mHLA=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+ECD_mEthnicity=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+ECD_mNZdepInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+D1(ECD_mAntibodies, ECD_mHLA)
+D1(ECD_mAntibodies, ECD_mEthnicity)
+D1(ECD_mAntibodies, ECD_mNZdepInt)
+summary(pool(ECD_mHLA))
+```
+
+Remove ethnicity
+```{r}
+ECD_mEthnicity=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+ECD_mNZdepInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mLastTreat=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+D1(ECD_mHLA, ECD_mEthnicity)
+D1(ECD_mHLA, ECD_mNZdepInt)
+D1(ECD_mHLA, ECD_mLastTreat)
+summary(pool(ECD_mEthnicity))
+```
+
+Remove Lung disease
+```{r}
+ECD_mYearInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ecd*nzDep2006, tt=function(x,t,...) x*t))
+ECD_mNZdepInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mLung=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+D1(ECD_mEthnicity, ECD_mYearInt)
+D1(ECD_mEthnicity, ECD_mNZdepInt)
+D1(ECD_mEthnicity, ECD_mLung)
+summary(pool(ECD_mLung))
+```
+
+Remove NZdepInt
+```{r}
+ECD_mNZdepInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mLastTreat=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+ECD_mCereb=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tt=function(x,t,...) x*t))
+D1(ECD_mLung, ECD_mNZdepInt)
+D1(ECD_mLung, ECD_mLastTreat)
+D1(ECD_mLung, ECD_mCereb)
+summary(pool(ECD_mNZdepInt))
+```
+
+Remove Last Treat
+```{r}
+ECD_mYearInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mLastTreat=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mCereb=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+D1(ECD_mNZdepInt, ECD_mYearInt)
+D1(ECD_mNZdepInt, ECD_mLastTreat)
+D1(ECD_mNZdepInt, ECD_mCereb)
+summary(pool(ECD_mLastTreat))
+```
+
+Remove Ischemic
+```{r}
+ECD_mYearInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mIschemic=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mCereb=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+D1(ECD_mLastTreat, ECD_mYearInt)
+D1(ECD_mLastTreat, ECD_mIschemic)
+D1(ECD_mLastTreat, ECD_mCereb)
+summary(pool(ECD_mIschemic))
+```
+
+Remove Cause Eskd
+```{r}
+ECD_mYearInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+dual+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mCauseESKD=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mCereb=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+D1(ECD_mIschemic, ECD_mYearInt)
+D1(ECD_mIschemic, ECD_mCauseESKD)
+D1(ECD_mIschemic, ECD_mCereb)
+summary(pool(ECD_mCauseESKD))
+```
+
+Remove Cereb
+```{r}
+ECD_mCereb=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mYearInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+dual+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mDual=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+D1(ECD_mCauseESKD, ECD_mCereb)
+D1(ECD_mCauseESKD, ECD_mYearInt)
+D1(ECD_mCauseESKD, ECD_mDual)
+summary(pool(ECD_mCereb))
+```
+
+Remove Dual
+```{r}
+ECD_mDual=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mYearInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+dual+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mHeart=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+dual+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+D1(ECD_mCereb, ECD_mDual)
+D1(ECD_mCereb, ECD_mYearInt)
+D1(ECD_mCereb, ECD_mHeart)
+summary(pool(ECD_mDual))
+```
+
+Remove Year interaction
+```{r}
+ECD_mPerph=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+ECD_mYearInt=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mHeart=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+ ecd*transplantYear, tt=function(x,t,...) x*t))
+D1(ECD_mDual, ECD_mPerph)
+D1(ECD_mDual, ECD_mYearInt)
+D1(ECD_mDual, ECD_mHeart)
+summary(pool(ECD_mYearInt))
+```
+
+Remove Perph
+```{r}
+ECD_mPerph=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mSmoking=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mHeart=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+D1(ECD_mYearInt, ECD_mPerph)
+D1(ECD_mYearInt, ECD_mSmoking)
+D1(ECD_mYearInt, ECD_mHeart)
+summary(pool(ECD_mPerph))
+```
+
+Remove Heart Disease
+```{r}
+ECD_mCentre=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear, tt=function(x,t,...) x*t))
+ECD_mSmoking=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mHeart=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+D1(ECD_mPerph, ECD_mCentre)
+D1(ECD_mPerph, ECD_mSmoking)
+D1(ECD_mPerph, ECD_mHeart)
+summary(pool(ECD_mHeart))
+```
+
+
+Final model
+```{r}
+ECD_mCentre=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear, tt=function(x,t,...) x*t))
+ECD_mSmoking=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mYear=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantCentre, tt=function(x,t,...) x*t))
+ECD_mTimeDep=with(imp,coxph(surv_kidney~ecd+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantCentre))
+D1(ECD_mHeart, ECD_mCentre)
+D1(ECD_mHeart, ECD_mSmoking)
+D1(ECD_mHeart, ECD_mYear)
+D1(ECD_mHeart, ECD_mTimeDep)
+ECD_final=with(imp,coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t))
+```
+
+```{r}
+summary(pool(ECD_final))
+```
+
+```{r}
+exp(1.0646803698-0.0002047743*1000)
+exp(1.0646803698-0.0002047743*3000)
+exp(1.0646803698-0.0002047743*5000)
+```
+
+```{r}
+exp(c(1.0646803698-1.96*2.256530e-01, 1.0646803698+1.96*2.256530e-01))
+exp(c(-0.0002047743-1.96*8.021092e-05,-0.0002047743+1.96*8.021092e-05))
+```
+
+Comparing with complete case dataset
+```{r}
+ECD_final_comp=coxph(surv_kidney_complete~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t, data = data_complete)
+summary(ECD_final_comp)
+```
+
+```{r}
+exp(c(1.065-1.96*0.253, 1.065+1.96*0.253))
+exp(c(-1.627e-04-1.96*9.073e-05,-1.627e-04+1.96*9.073e-05))
+```
+
+```{r}
+D1(full.cox_ECD, ECD_final)
+```
+
+```{r}
+oneImp=complete(imp)
+oneImp_ECD=coxph(surv_kidney~ecd+tt(ecd)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, tt=function(x,t,...) x*t, data=oneImp)
+ECD_resid=residuals(oneImp_ECD, type = "martingale")
+plot(1:length(ECD_resid), ECD_resid)
+length(ECD_resid)
+attach(oneImp)
+plot(ecd,ECD_resid)
+plot(age,ECD_resid)
+plot(male,ECD_resid)
+plot(nzDepScore2006,ECD_resid)
+plot(bmi,ECD_resid)
+plot(diabetes,ECD_resid)
+plot(dialysisTime,ECD_resid)
+plot(transplantYear,ECD_resid)
+plot(transplantCentre,ECD_resid)
+```
+
+#Full model - KDRI proper imp
+
+```{r}
+full.cox_KDRI=with(imp, coxph(surv_kidney~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+summary(pool(full.cox_KDRI))
+```
+
+#https://stefvanbuuren.name/fimd/sec-stepwise.html for stepwise selection
+
+HLA has the least effect so it is removed from model
+```{r}
+KDRI_mHLA=with(imp, coxph(surv_kidney~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+KDRI_mAntibodies=with(imp,coxph(surv_kidney~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+KDRI_mLung=with(imp, coxph(surv_kidney~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+HLAmismatch+dialysisTime+lastTreatment+ischemicTime+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+D1(full.cox_KDRI, KDRI_mHLA)
+D1(full.cox_KDRI, KDRI_mAntibodies)
+D1(full.cox_KDRI, KDRI_mLung)
+summary(pool(KDRI_mHLA))
+```
+
+Then remove antibodies
+```{r}
+KDRI_mLung=with(imp, coxph(surv_kidney~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+KDRI_mAntibodies=with(imp,coxph(surv_kidney~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+KDRI_mEthnicity=with(imp, coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+D1(KDRI_mHLA,KDRI_mLung)
+D1(KDRI_mHLA,KDRI_mAntibodies)
+D1(KDRI_mHLA,KDRI_mEthnicity)
+summary(pool(KDRI_mAntibodies))
+```
+
+Ethnicity comes out
+```{r}
+KDRI_mLung=with(imp,coxph(surv_kidney~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+KDRI_mEthnicity=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+KDRI_mNzdepint=with(imp,coxph(surv_kidney~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear))
+D1(KDRI_mAntibodies,KDRI_mLung)
+D1(KDRI_mAntibodies,KDRI_mEthnicity)
+D1(KDRI_mAntibodies,KDRI_mNzdepint)
+summary(pool(KDRI_mEthnicity))
+```
+
+Interaction with NZ dep is removed
+```{r}
+KDRI_mLung=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+KDRI_mLastTreat=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006))
+KDRI_mNzdepint=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear))
+D1(KDRI_mEthnicity, KDRI_mLung)
+D1(KDRI_mEthnicity, KDRI_mLastTreat)
+D1(KDRI_mEthnicity, KDRI_mNzdepint)
+summary(pool(KDRI_mNzdepint))
+```
+
+Lung disease is removed
+```{r}
+KDRI_mLung=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mDual=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mIschemic=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+dual+transplantYear+transplantCentre+ KDRI*transplantYear))
+D1(KDRI_mNzdepint, KDRI_mLung)
+D1(KDRI_mNzdepint, KDRI_mDual)
+D1(KDRI_mNzdepint, KDRI_mIschemic)
+summary(pool(KDRI_mLung))
+```
+
+Dual is removed
+```{r}
+KDRI_mDual=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mLastTreat=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mCerebeovascular=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+ KDRI*transplantYear))
+D1(KDRI_mLung, KDRI_mDual)
+D1(KDRI_mLung, KDRI_mLastTreat)
+D1(KDRI_mLung, KDRI_mCerebeovascular)
+summary(pool(KDRI_mDual))
+```
+
+Ischemic is removed.
+```{r}
+KDRI_mCerebeovascular=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+ischemicTime+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mLastTreat=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+ischemicTime+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mIschemic=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+transplantYear+transplantCentre+ KDRI*transplantYear))
+D1(KDRI_mDual, KDRI_mCerebeovascular)
+D1(KDRI_mDual, KDRI_mLastTreat)
+D1(KDRI_mDual, KDRI_mIschemic)
+summary(pool(KDRI_mIschemic))
+```
+
+Cerebrovascular is removed
+```{r}
+KDRI_mLastTreat=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mCerebrovascular=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mPeripheralVasc=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+diabetes+cerebrovascular+dialysisTime+lastTreatment+transplantYear+transplantCentre+ KDRI*transplantYear))
+D1(KDRI_mIschemic, KDRI_mLastTreat)
+D1(KDRI_mIschemic, KDRI_mCerebrovascular)
+D1(KDRI_mIschemic, KDRI_mPeripheralVasc)
+summary(pool(KDRI_mCerebeovascular))
+```
+
+LastTreat is removed
+```{r}
+KDRI_mLastTreat=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mHeartDisease=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+lastTreatment+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mPeripheralVasc=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+lastTreatment+transplantYear+transplantCentre+ KDRI*transplantYear))
+D1(KDRI_mCerebrovascular, KDRI_mLastTreat)
+D1(KDRI_mCerebrovascular, KDRI_mHeartDisease)
+D1(KDRI_mCerebrovascular, KDRI_mPeripheralVasc)
+summary(pool(KDRI_mLastTreat))
+```
+
+YearInt comes out
+```{r}
+KDRI_mHeartDisease=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mPeripheralVasc=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre+ KDRI*transplantYear))
+KDRI_mYearInt=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre))
+D1(KDRI_mLastTreat, KDRI_mHeartDisease)
+D1(KDRI_mLastTreat, KDRI_mPeripheralVasc)
+D1(KDRI_mLastTreat, KDRI_mYearInt)
+summary(pool(KDRI_mYearInt))
+```
+
+CauseESKD is removed
+```{r}
+KDRI_mHeartDisease=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre))
+KDRI_mPeripheralVasc=with(imp,coxph(surv_kidney~KDRI+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre))
+KDRI_mCauseESKD=with(imp,coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre))
+D1(KDRI_mYearInt, KDRI_mHeartDisease)
+D1(KDRI_mYearInt, KDRI_mPeripheralVasc)
+D1(KDRI_mYearInt, KDRI_mCauseESKD)
+summary(pool(KDRI_mCauseESKD))
+```
+
+Peripheral vasc removed
+```{r}
+KDRI_mPeripheralVasc=with(imp,coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre))
+KDRI_mTransplantCentre=with(imp,coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear))
+KDRI_mHeartDisease=with(imp,coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre))
+D1(KDRI_mCauseESKD, KDRI_mPeripheralVasc)
+D1(KDRI_mCauseESKD, KDRI_mTransplantCentre)
+D1(KDRI_mCauseESKD, KDRI_mHeartDisease)
+summary(pool(KDRI_mPeripheralVasc))
+```
+
+
+```{r}
+KDRI_mSmoking=with(imp,coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre))
+KDRI_mHeartDisease=with(imp,coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre))
+KDRI_mTransplantCentre=with(imp,coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear))
+D1(KDRI_mPeripheralVasc, KDRI_mSmoking)
+D1(KDRI_mPeripheralVasc, KDRI_mHeartDisease)
+D1(KDRI_mPeripheralVasc, KDRI_mTransplantCentre)
+summary(pool(KDRI_mHeartDisease))
+final_KDRI=with(imp,coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre))
+```
+
+
+```{r}
+summary(pool(final_KDRI))
+```
+
+
+```{r}
+D1(full.cox_KDRI, final_KDRI)
+exp(c(0.72117819-1.96*0.160653937, 0.72117819+1.96*0.160653937))
+```
+
+```{r}
+KDRI_full_noMiss=coxph(surv_kidney_complete~KDRI+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre, data = data_complete)
+summary(KDRI_full_noMiss)
+```
+
+Residuals with first imputation model
+```{r}
+oneImp=complete(imp)
+oneImp_KDRI=coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, data = oneImp)
+KDRI_resid=residuals(oneImp_KDRI)
+attach(oneImp)
+plot(KDRI,KDRI_resid, main = "KDRI Residuals for Final model", ylab = "Martingale residuals")
+plot(age,KDRI_resid)
+plot(male,KDRI_resid)
+plot(nzDepScore2006,KDRI_resid)
+plot(bmi,KDRI_resid)
+plot(diabetes,KDRI_resid)
+plot(dialysisTime,KDRI_resid)
+plot(transplantYear,KDRI_resid)
+plot(transplantCentre,KDRI_resid)
+```
+
+Residuals with second imputation model
+```{r}
+oneImp=complete(imp, 2)
+oneImp_KDRI=coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, data = oneImp)
+KDRI_resid=residuals(oneImp_KDRI)
+attach(oneImp)
+plot(KDRI,KDRI_resid)
+plot(age,KDRI_resid)
+plot(male,KDRI_resid)
+plot(nzDepScore2006,KDRI_resid)
+plot(bmi,KDRI_resid)
+plot(diabetes,KDRI_resid)
+plot(dialysisTime,KDRI_resid)
+plot(transplantYear,KDRI_resid)
+plot(transplantCentre,KDRI_resid)
+
+```
+
+Residuals with third imputation model
+```{r}
+oneImp=complete(imp, 3)
+oneImp_KDRI=coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, data = oneImp)
+KDRI_resid=residuals(oneImp_KDRI)
+attach(oneImp)
+plot(KDRI,KDRI_resid)
+plot(age,KDRI_resid)
+plot(male,KDRI_resid)
+plot(nzDepScore2006,KDRI_resid)
+plot(bmi,KDRI_resid)
+plot(diabetes,KDRI_resid)
+plot(dialysisTime,KDRI_resid)
+plot(transplantYear,KDRI_resid)
+plot(transplantCentre,KDRI_resid)
+```
+
+
+Residuals with fourth imputation model
+```{r}
+oneImp=complete(imp, 4)
+oneImp_KDRI=coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, data = oneImp)
+KDRI_resid=residuals(oneImp_KDRI)
+attach(oneImp)
+plot(KDRI,KDRI_resid)
+plot(age,KDRI_resid)
+plot(male,KDRI_resid)
+plot(nzDepScore2006,KDRI_resid)
+plot(bmi,KDRI_resid)
+plot(diabetes,KDRI_resid)
+plot(dialysisTime,KDRI_resid)
+plot(transplantYear,KDRI_resid)
+plot(transplantCentre,KDRI_resid)
+```
+
+
+Residuals with fifth imputation model
+```{r}
+oneImp=complete(imp, 5)
+oneImp_KDRI=coxph(surv_kidney~KDRI+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, data = oneImp)
+KDRI_resid=residuals(oneImp_KDRI)
+attach(oneImp)
+plot(KDRI,KDRI_resid)
+plot(age,KDRI_resid)
+plot(male,KDRI_resid)
+plot(nzDepScore2006,KDRI_resid)
+plot(bmi,KDRI_resid)
+plot(diabetes,KDRI_resid)
+plot(dialysisTime,KDRI_resid)
+plot(transplantYear,KDRI_resid)
+plot(transplantCentre,KDRI_resid)
+```
+
+
+#KDPI
+
+```{r}
+full.cox_KDPI=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+summary(pool(full.cox_KDPI))
+```
+
+Remove HLA
+```{r}
+KDPI_mHLA=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+currentAntibodies+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+KDPI_mAntibodies=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+KDPI_mEthnicity=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+D1(full.cox_KDPI, KDPI_mHLA)
+D1(full.cox_KDPI, KDPI_mAntibodies)
+D1(full.cox_KDPI, KDPI_mEthnicity)
+summary(pool(KDPI_mHLA))
+```
+
+Remove Antibodies
+```{r}
+KDPI_mEthnicity=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+currentAntibodies+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+KDPI_mAntibodies=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+KDPI_mLung=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+currentAntibodies+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+D1(KDPI_mHLA, KDPI_mEthnicity)
+D1(KDPI_mHLA, KDPI_mAntibodies)
+D1(KDPI_mHLA, KDPI_mLung)
+summary(pool(KDPI_mAntibodies))
+```
+
+Remove Ethnicity
+```{r}
+KDPI_mEthnicity=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+KDPI_mNzdepInt=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mLung=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+D1(KDPI_mAntibodies, KDPI_mEthnicity)
+D1(KDPI_mAntibodies, KDPI_mNzdepInt)
+D1(KDPI_mAntibodies, KDPI_mLung)
+summary(pool(KDPI_mEthnicity))
+```
+
+Remove Lung
+```{r}
+KDPI_mLastTreat=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+KDPI_mNzdepInt=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mLung=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+D1(KDPI_mEthnicity, KDPI_mLastTreat)
+D1(KDPI_mEthnicity, KDPI_mNzdepInt)
+D1(KDPI_mEthnicity, KDPI_mLung)
+summary(pool(KDPI_mLung))
+```
+
+Interaction with NZ dep is removed
+```{r}
+KDPI_mLastTreat=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+KDPI_mNzdepInt=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mDual=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear+(KDPI>85)*nzDep2006))
+D1(KDPI_mLung, KDPI_mLastTreat)
+D1(KDPI_mLung, KDPI_mNzdepInt)
+D1(KDPI_mLung, KDPI_mDual)
+summary(pool(KDPI_mNzdepInt))
+```
+
+Remove Cereb
+```{r}
+KDPI_mLastTreat=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mCereb=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mDual=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+dialysisTime+lastTreatment+ischemicTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+D1(KDPI_mNzdepInt, KDPI_mLastTreat)
+D1(KDPI_mNzdepInt, KDPI_mCereb)
+D1(KDPI_mNzdepInt, KDPI_mDual)
+summary(pool(KDPI_mCereb))
+```
+
+Remove Ischemic
+```{r}
+KDPI_mCauseESKD=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mLastTreat=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+ischemicTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mIschemic=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+D1(KDPI_mCereb, KDPI_mCauseESKD)
+D1(KDPI_mCereb, KDPI_mLastTreat)
+D1(KDPI_mCereb, KDPI_mIschemic)
+summary(pool(KDPI_mIschemic))
+```
+
+Remove Cause of ESKD
+```{r}
+KDPI_mCauseESKD=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mDual=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mLastTreat=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+D1(KDPI_mIschemic, KDPI_mCauseESKD)
+D1(KDPI_mIschemic, KDPI_mDual)
+D1(KDPI_mIschemic, KDPI_mLastTreat)
+summary(pool(KDPI_mCauseESKD))
+```
+
+Remove Dual
+```{r}
+KDPI_mTransplantYearInt=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+dual+transplantYear+transplantCentre))
+KDPI_mDual=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mLastTreat=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+dual+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+D1(KDPI_mCauseESKD, KDPI_mTransplantYearInt)
+D1(KDPI_mCauseESKD, KDPI_mDual)
+D1(KDPI_mCauseESKD, KDPI_mLastTreat)
+summary(pool(KDPI_mDual))
+```
+
+Remove Last Treat
+```{r}
+KDPI_mTransplantYearInt=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+lastTreatment+transplantYear+transplantCentre))
+KDPI_mLastTreat=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mHeartDisease=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+lastTreatment+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+D1(KDPI_mDual, KDPI_mTransplantYearInt)
+D1(KDPI_mDual, KDPI_mLastTreat)
+D1(KDPI_mDual, KDPI_mHeartDisease)
+summary(pool(KDPI_mLastTreat))
+```
+
+Remove Transplant year interaction
+```{r}
+KDPI_mTransplantYearInt=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre))
+KDPI_mHeartDisease=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+KDPI_mPeriph=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear))
+D1(KDPI_mLastTreat, KDPI_mTransplantYearInt)
+D1(KDPI_mLastTreat, KDPI_mHeartDisease)
+D1(KDPI_mLastTreat, KDPI_mPeriph)
+summary(pool(KDPI_mTransplantYearInt))
+```
+
+
+```{r}
+KDPI_mHeartDisease=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre))
+KDPI_mTransplantCentre=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+dialysisTime+transplantYear))
+KDPI_mPeriph=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre))
+D1(KDPI_mTransplantYearInt, KDPI_mHeartDisease)
+D1(KDPI_mTransplantYearInt, KDPI_mTransplantCentre)
+D1(KDPI_mTransplantYearInt, KDPI_mPeriph)
+summary(pool(KDPI_mPeriph))
+```
+
+```{r}
+KDPI_mHeartDisease=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre))
+KDPI_mTransplantCentre=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+heartdisease+diabetes+dialysisTime+transplantYear))
+KDPI_mSmoking=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+heartdisease+diabetes+dialysisTime+transplantYear+transplantCentre))
+D1(KDPI_mPeriph, KDPI_mHeartDisease)
+D1(KDPI_mPeriph, KDPI_mTransplantCentre)
+D1(KDPI_mPeriph, KDPI_mSmoking)
+summary(pool(KDPI_mHeartDisease))
+```
+
+```{r}
+KDPI_mTransplantYear=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantCentre))
+KDPI_mTransplantCentre=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear))
+KDPI_mSmoking=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+diabetes+dialysisTime+transplantYear+transplantCentre))
+D1(KDPI_mHeartDisease, KDPI_mTransplantYear)
+D1(KDPI_mHeartDisease, KDPI_mTransplantCentre)
+D1(KDPI_mHeartDisease, KDPI_mSmoking)
+final_KDPI=with(imp,coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre))
+```
+
+
+```{r}
+summary(pool(final_KDPI))
+```
+
+
+```{r}
+exp(c(0.486991230-1.96*0.134826963,0.486991230+1.96*0.134826963))
+```
+
+```{r}
+D1(full.cox_KDPI, final_KDPI)
+```
+
+KDPI with complete cases
+```{r}
+KDPI_full_noMiss=coxph(surv_kidney_complete~(KDPI>85)+age+male+nzDep2006+bmi+smoking+diabetes+dialysisTime+transplantYear+transplantCentre, data = data_complete)
+summary(KDPI_full_noMiss)
+```
+
+Residuals with first imputation model
+```{r}
+oneImp=complete(imp)
+oneImp_KDPI=coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear, data = oneImp)
+KDPI_resid=residuals(oneImp_KDPI)
+attach(oneImp)
+plot(KDPI,KDPI_resid, main = "KDPI Residuals for Final model", ylab = "Martingale residuals")
+plot(age,KDPI_resid)
+plot(male,KDPI_resid)
+plot(nzDepScore2006,KDPI_resid)
+plot(bmi,KDPI_resid)
+plot(peripheralvasc,KDPI_resid)
+plot(diabetes,KDPI_resid)
+plot(dialysisTime,KDPI_resid)
+plot(transplantYear,KDPI_resid)
+plot(transplantCentre,KDPI_resid)
+```
+
+Residuals with second imputation model
+```{r}
+oneImp=complete(imp,2)
+oneImp_KDPI=coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear, data = oneImp)
+KDPI_resid=residuals(oneImp_KDPI)
+attach(oneImp)
+plot(KDPI,KDPI_resid)
+plot(age,KDPI_resid)
+plot(male,KDPI_resid)
+plot(nzDepScore2006,KDPI_resid)
+plot(bmi,KDPI_resid)
+plot(peripheralvasc,KDPI_resid)
+plot(diabetes,KDPI_resid)
+plot(dialysisTime,KDPI_resid)
+plot(transplantYear,KDPI_resid)
+plot(transplantCentre,KDPI_resid)
+```
+
+Residuals with third imputation model
+```{r}
+oneImp=complete(imp,3)
+oneImp_KDPI=coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear, data = oneImp)
+KDPI_resid=residuals(oneImp_KDPI)
+attach(oneImp)
+plot(KDPI,KDPI_resid)
+plot(age,KDPI_resid)
+plot(male,KDPI_resid)
+plot(nzDepScore2006,KDPI_resid)
+plot(bmi,KDPI_resid)
+plot(peripheralvasc,KDPI_resid)
+plot(diabetes,KDPI_resid)
+plot(dialysisTime,KDPI_resid)
+plot(transplantYear,KDPI_resid)
+plot(transplantCentre,KDPI_resid)
+```
+
+Residuals with fourth imputation model
+```{r}
+oneImp=complete(imp,4)
+oneImp_KDPI=coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear, data = oneImp)
+KDPI_resid=residuals(oneImp_KDPI)
+attach(oneImp)
+plot(KDPI,KDPI_resid)
+plot(age,KDPI_resid)
+plot(male,KDPI_resid)
+plot(nzDepScore2006,KDPI_resid)
+plot(bmi,KDPI_resid)
+plot(peripheralvasc,KDPI_resid)
+plot(diabetes,KDPI_resid)
+plot(dialysisTime,KDPI_resid)
+plot(transplantYear,KDPI_resid)
+plot(transplantCentre,KDPI_resid)
+```
+
+Residuals with fifth imputation model
+```{r}
+oneImp=complete(imp,5)
+oneImp_KDPI=coxph(surv_kidney~(KDPI>85)+age+male+nzDep2006+bmi+peripheralvasc+diabetes+dialysisTime+transplantYear+transplantCentre+(KDPI>85)*transplantYear, data = oneImp)
+KDPI_resid=residuals(oneImp_KDPI)
+attach(oneImp)
+plot(KDPI,KDPI_resid)
+plot(age,KDPI_resid)
+plot(male,KDPI_resid)
+plot(nzDepScore2006,KDPI_resid)
+plot(bmi,KDPI_resid)
+plot(peripheralvasc,KDPI_resid)
+plot(diabetes,KDPI_resid)
+plot(dialysisTime,KDPI_resid)
+plot(transplantYear,KDPI_resid)
+plot(transplantCentre,KDPI_resid)
+```
+
+

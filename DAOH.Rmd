@@ -1,0 +1,853 @@
+---
+title: "DAOH"
+author: "Connor Sullivan"
+date: "2021"
+output: html_document
+---
+
+```{r}
+library(lubridate)
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(mice)
+library(quantreg)
+```
+
+Reading in important libraries.
+
+```{r}
+#Reading in ANZDATA
+master=read.csv("master.csv")
+```
+
+Reading in data from NMDS
+```{r}
+util=read.csv("util.csv")
+```
+
+Getting and formatting NMDS data so it can be added
+
+```{r}
+NMDS=data.frame(patientID=util$patient_id,
+ethnicity=recode(util$ETHNICGP,"10"="European","11"="European","12"="European", "21"="NZM", "30"="Pacific","31"="Pacific","32"="Pacific","33"="Pacific","34"="Pacific","35"="Pacific","36"="Pacific","37"="Pacific","40"="Asian","41"="Asian","42"="Asian","43"="Asian","44"="Asian" ,.default="Other"), domcodes=util$DOM_CD)
+NMDS=as.data.frame(NMDS%>%group_by(patientID)%>%filter(row_number()==1))
+```
+
+Reading in NZdep scores
+```{r}
+cau_dep=read.csv("CAU dep.csv")
+dom_census=read.csv("dom census.csv")
+
+cau_dep=data.frame(Description=cau_dep$CAU_name_2006, 
+                   nzDep2006=cau_dep$CAU_average_NZDep2006,
+                   nzDepScore2006=cau_dep$CAU_average_NZDep_score_2006)
+
+dom_census=data.frame(domcodes=dom_census$dom, Description=dom_census$Description)
+
+dom_census$domcodes=str_pad(dom_census$domcodes, 4, pad = "0")
+
+dep=full_join(cau_dep, dom_census, by="Description")
+
+#Manually setting values for typos in the joining description
+dep=dep[1:2026,]
+dep$domcodes[12]="0012"
+dep$domcodes[104]="0113"
+dep$domcodes[223]="0274"
+dep$domcodes[369]="0499"
+dep$domcodes[419]="0641"
+dep$domcodes[509]="0807"
+dep$domcodes[520]="1906"
+dep$domcodes[624]="1007"
+dep$domcodes[1026]="1640"
+dep$domcodes[1425]="2311"
+dep$domcodes[1426]="2312"
+dep$domcodes[1504]="2524"
+dep$domcodes[1534]="1122"
+dep$domcodes[1758]="2822"
+dep$domcodes[1801]="2908"
+dep$domcodes[1865]="3022"
+```
+
+```{r}
+#Creating play dataset
+ANZDATA=data.frame(patientID=master$id, 
+transplantDate=dmy(master$t0),
+lastdate=dmy(master$lastfollowupdate),
+time=master$aliveperiod,age=master$ageattransplant,male=master$gendercode,
+bmi=master$bmi, smoking=recode(master$smoking, N=0, F=1, C=1), 
+heartdisease=recode(master$coronaryarterycode, N=0, S=1, Y=1),
+lungdisease=recode(master$chroniclungcode,N=0, S=1, Y=1),
+peripheralvasc=recode(master$peripheralvascularcode,N=0, S=1, Y=1),
+cerebrovascular=recode(master$cerebrovasularcode,N=0, S=1, Y=1),
+diabetes=master$diabetescode,
+currentAntibodies=master$maxcytotoxicantibodies,
+lastTreatment=recode(master$lasttreatmentpretransplant,.default = "Haemodialysis", 
+"APD"="Peritoneal dialysis", "CAPD"="Peritoneal dialysis",
+"Pre-emptive transplant"="Pre-emptive transplant", 
+"Own Kidney Function Recovered"="Own Kidney Function Recovered"),
+dialysisTime=(as.integer(dmy(master$t0)-dmy(master$treatmentdate)))/365,
+causeESKD=master$discat,dead=master$alivestatus,
+ecd=recode(master$ecd, SCD=0, ECD=1), causeDeath=master$donorcauseofdeath,                donorAge=master$donorage,donorMale=master$donorgendercode,
+donorHeight=master$donorheight, donorWeight=master$donorweight,
+HLAmismatch=master$hlamismatch, HLA_A=master$hlamismatchesa,
+HLA_B=master$hlamismatchesb, HLA_DR=master$hlamismatchesdr, ischemicTime=master$ischaemia, 
+creat=master$creatinineterminal,KDRI=master$kdri, KDPI=master$kdpi,
+donorHeartbeat=recode(master$heartbeatingcode, N=0, Y=1),
+donorDiab=recode(master$donordiabetescode, N=0, P=1, T=1),
+donorHyper=recode(master$hypertensioncode, N=0, Y=1), 
+donorOlig=recode(master$oliguriacode, N=0, Y=1),
+transplantCentre=master$transplantcentrecodeid, dual=master$dual)
+```
+
+Combining data bases
+```{r}
+data=full_join(ANZDATA, NMDS, by="patientID")%>%full_join(dep, by="domcodes")
+data=as.data.frame(data%>%group_by(patientID)%>%filter(row_number()==1))
+data=data[-1039,]
+```
+
+```{r}
+data=subset(data, select = -c(domcodes, Description))
+
+data$causeESKD=recode(data$causeESKD, "Diabetic Nephropathy"="Diabetic Nephropathy", .default = "Other")
+data$diabetes=recode(data$diabetes, "N"=F, .default = T)
+
+data$causeESKD=as.factor(data$causeESKD)
+data$smoking=as.logical(data$smoking)
+data$dead=as.logical(data$dead)
+data$male=as.logical(data$male)
+data$smoking=as.logical(data$smoking)
+data$heartdisease=as.logical(data$heartdisease)
+data$lungdisease=as.logical(data$lungdisease)
+data$peripheralvasc=as.logical(data$peripheralvasc)
+data$diabetes=as.factor(data$diabetes)
+data$donorHeartbeat=as.logical(data$donorHeartbeat)
+data$cerebrovascular=as.logical(data$cerebrovascular)
+data$lastTreatment=as.factor(data$lastTreatment)
+data$HLAmismatch=as.factor(data$HLAmismatch)
+data$HLA_A=as.factor(data$HLA_A)
+data$HLA_B=as.factor(data$HLA_B)
+data$HLA_DR=as.factor(data$HLA_DR)
+data$ecd=as.logical(data$ecd)
+data$donorMale=as.logical(data$donorMale)
+data$donorOlig=as.logical(data$donorOlig)
+data$donorDiab=as.logical(data$donorDiab)
+data$donorHyper=as.logical(data$donorHyper)
+data$ethnicity=as.factor(data$ethnicity)
+data$causeDeath=as.factor(data$causeDeath)
+data$transplantCentre=as.factor(data$transplantCentre)
+data$dual=as.factor(data$dual)
+```
+
+Reading in the data
+```{r}
+dates=data.frame(patientID=util$patient_id, transdate=dmy(util$TransplantDate)
+                 ,eventstart=dmy(util$EVSTDATE), eventend=dmy(util$EVENDATE)
+                 ,domCode=util$DOM_CD)
+```
+
+```{r}
+deaths=data.frame(patientID=master$id,time=master$aliveperiod)
+dates=dates %>% full_join(deaths, by="patientID")
+dates=dates[1:length(util[,1]),]
+```
+
+Fixing dates. Changing dates as people died day before they left hospital. Then sorting.
+```{r}
+wrong_index=which(as.integer(dates$eventstart-dates$transdate)<0)
+dates$eventstart[wrong_index]=dates$transdate[wrong_index]
+
+dates$eventend[which(dates$patientID=="P9906946")]=dmy("28/09/2003")
+dates$eventend[which(dates$patientID=="P9904011")]=dmy("26/07/2005")
+
+dates=as.data.frame(dates%>%arrange(patientID,eventstart))
+```
+
+A function where it will return a vector of DAOH for a given number of days
+```{r}
+daysFunction=function(days){
+  days=days
+  index=1
+  los_tot=c()
+  while (index<length(dates[,1])) {
+    patient=dates$patientID[index]
+    count=0
+    while(index+count+1<=length(dates[,1])&patient==dates$patientID[index+count+1]){
+      dates$patientID[index+count+1]
+      count=count+1
+    }
+    los=c()
+    for (i in index:(index+count)) {
+      if(as.integer(dates$eventend[i]-dates$transdate[i])<days){
+        los[i-index+1]=as.integer(dates$eventend[i]-dates$eventstart[i])
+      } else if(as.integer(dates$eventstart[i]-dates$transdate[i])<days){
+        los[i-index+1]=days-(as.integer(dates$eventstart[i]-dates$transdate[i]))
+      } else{
+        break
+      }
+    }
+    pat.index=which(dates$patientID==patient)
+    if(dates$time[pat.index[1]]>days){
+      tot=days-sum(los)
+    } else{
+      tot=days-(sum(los)+(days-dates$time[pat.index[1]]))
+    }
+    if(dates$time[index]<=days){
+      tot=0
+    }
+    count=count+1
+    los_tot=append(los_tot,rep(tot, count))
+    index=index+count
+  }
+  return(los_tot)
+}
+```
+
+DAOH for 28 days
+```{r}
+days28=daysFunction(28)
+```
+
+Making a DAOH dataframe
+```{r}
+DAOH=data.frame(days28)
+final=data.frame("patientID"=dates$patientID, DAOH)
+final=as.data.frame(final%>%group_by(patientID)%>%filter(row_number()==1))
+```
+People have multiple dom codes but only the dom code from first hospital visit is used.
+
+Then join to NZdep with dom codes
+```{r}
+finaldf=final %>% full_join(data, by="patientID")
+
+finaldf=finaldf[finaldf$transplantCentre!="H6540777",]
+finaldf$transplantCentre=droplevels(finaldf$transplantCentre)
+finaldf=subset(finaldf, select=-c(patientID, lastdate))
+```
+
+Looking at histograms
+```{r}
+hist(finaldf$days28, breaks=28, main="DAOH 28 days after transplantation", xlab="Days alive and out of hospital")
+```
+
+```{r}
+boxplot(finaldf$days28~finaldf$ecd, main="Boxplot of DAOH28 split by ECD/SCD", xlab = "Extended Criteria Donor", ylab="DAOH28")
+plot(jitter(finaldf$KDRI, 0.05), finaldf$days28)
+plot(jitter(finaldf$KDPI, 0.05), finaldf$days28)
+
+hist(finaldf$days28[finaldf$ecd==T], freq = FALSE)
+hist(finaldf$days28[finaldf$ecd==F], freq = FALSE)
+```
+
+Fitting some linear models
+```{r}
+lm_ecd=lm(days28 ~ ecd, data = finaldf)
+summary(lm_ecd)
+plot(lm_ecd)
+
+lm_KDRI=lm(days28 ~ KDRI, data = finaldf)
+summary(lm_KDRI)
+plot(lm_KDRI)
+
+lm_KDPI.85=lm(days28 ~ KDPI>85, data = finaldf)
+summary(lm_KDPI.85)
+```
+
+
+
+Fitting the quantile regressions
+```{r}
+ecd_uni_0.5 <- rq(days28 ~ ecd, tau = .5, data = finaldf)
+summary(ecd_uni_0.5, se="boot", R=5000)
+
+ecd_uni_0.75 <- rq(days28 ~ ecd, tau = .75, data = finaldf)
+summary(ecd_uni_0.75, se="boot", R=5000)
+```
+
+Fitting ECD model for all quantiles
+```{r}
+ecd_uni_all <- rq(days28 ~ ecd, tau = seq(0.01, 0.99, length.out=98), data = finaldf)
+plot(ecd_uni_all)
+```
+
+
+```{r}
+KDRI_uni_0.5 <- rq(days28 ~ KDRI, tau = .5, data = finaldf)
+summary(KDRI_uni_0.5, se="boot", R=5000)
+
+KDRI_uni_0.75 <- rq(days28 ~ KDRI, tau = .75, data = finaldf)
+summary(KDRI_uni_0.75, se="boot", R=5000)
+
+```
+
+
+```{r}
+c(-1.79352-1.96*0.66751   ,-1.79352+1.96*0.66751   )
+c(0-1.96*0.24208    ,0+1.96*0.24208    )
+
+plot(finaldf$KDRI, finaldf$days28, main="KDRI and DAOH with quantile regression estimates", xlab="KDRI", ylab="DAOH")
+abline(coef(KDRI_uni_0.5), col="red")
+abline(coef(KDRI_uni_0.75), col=4)
+legend("bottomright", legend = c("Median", "Upper Quartile"), col=c(2,4), lty=1)
+```
+
+
+Fitting KDRI model for all quantiles
+```{r}
+KDRI_uni_all <- rq(days28 ~ KDRI, tau = seq(0.01, 0.99, length.out=98), data = finaldf)
+plot(KDRI_uni_all)
+```
+
+
+```{r}
+KDPI_uni_0.5 <- rq(days28 ~ KDPI>85, tau = .5, data = finaldf)
+summary(KDPI_uni_0.5, se="boot", R=5000)
+
+KDPI_uni_0.75 <- rq(days28 ~ KDPI>85, tau = .75, data = finaldf)
+summary(KDPI_uni_0.75, se="boot", R=5000)
+```
+
+```{r}
+boxplot(finaldf$days28~finaldf$KDPI>85, main="Boxplot of DAOH28 split by KDPI", xlab = "KDPI above 85%", ylab="DAOH28")
+```
+
+Imputing the data
+```{r}
+imp_finaldf=subset(finaldf, select = -c(transplantDate, HLA_A, HLA_B, HLA_DR, time))
+
+imp_finaldf$ethnicity=recode(imp_finaldf$ethnicity, "NZM"="NZM", "Pacific"="Pacific", .default = "Non-Maori/Non-Pacific")
+imp_finaldf$lastTreatment=recode(imp_finaldf$lastTreatment, "Haemodialysis"="Haemodialysis", "Peritoneal dialysis"="Peritoneal dialysis", .default = "Pre-emptive transplant")
+imp_finaldf$nzDep2006=cut(imp_finaldf$nzDep2006,breaks=c(-Inf, 5.5, 8.5, Inf), labels=c("1-5","6-8","9-10"))
+imp_finaldf$transplantYear=cut(as.numeric(format(finaldf$transplantDate, "%Y")), 
+                            breaks = c(-Inf,2002.5,2007.5,2012.5,Inf),
+                            labels=c("1997-2002", "2003-2007", "2008-2012", "2013-2016"))
+imp_finaldf$causeESKD=recode(imp_finaldf$causeESKD, "Not reported"="Unknown", "Uncertain"="Unknown")
+
+imp=mice(imp_finaldf, m=5, maxit=20, seed=1, print=FALSE)
+```
+
+
+Complete Imp datasets
+```{r}
+imp1=complete(imp, 1)
+imp2=complete(imp, 2)
+imp3=complete(imp, 3)
+imp4=complete(imp, 4)
+imp5=complete(imp, 5)
+
+imp1$KDPI=imp1$KDPI>85
+imp2$KDPI=imp2$KDPI>85
+imp3$KDPI=imp3$KDPI>85
+imp4$KDPI=imp4$KDPI>85
+imp5$KDPI=imp5$KDPI>85
+```
+
+
+```{r}
+imp_ecd_0.5=with(imp, rq(days28 ~ ecd, tau = .5))
+summary(pool(imp_ecd_0.5), se="boot", R=5000)
+
+imp_ecd_0.75=with(imp, rq(days28 ~ ecd, tau = .75))
+summary(pool(imp_ecd_0.75), se="boot", R=5000)
+```
+
+```{r}
+imp_KDRI_0.5=with(imp, rq(days28 ~ KDRI, tau = .5))
+summary(pool(imp_KDRI_0.5), se="boot", R=5000)
+
+imp_KDRI_0.75=with(imp, rq(days28 ~ KDRI, tau = .75))
+summary(pool(imp_KDRI_0.75), se="boot", R=5000)
+```
+
+
+```{r}
+imp_KDPI_0.5=with(imp, rq(days28 ~ KDPI>85, tau = .5))
+summary(pool(imp_KDPI_0.5), se="boot", R=5000)
+
+imp_KDRI_0.75=with(imp, rq(days28 ~ KDRI>85, tau = .75)) #Error due to the data being binary
+summary(pool(imp_KDRI_0.75), se="boot", R=5000)
+```
+
+Full model for median, ECD
+```{r}
+full_ecd_0.5=with(imp, rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .5))
+summary(pool(full_ecd_0.5), se="boot")
+```
+
+Final ECD models with imputed datasets (First one)
+```{r, warning=F}
+ecd1_0.5=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .5, data = imp1)
+
+ecd1_0.5_final=step(ecd1_0.5, trace=0, direction = "backward")
+
+summary(ecd1_0.5_final)
+```
+
+```{r}
+ecd1_0.5_final$formula
+```
+
+Second
+```{r, warning=F}
+ecd2_0.5=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .5, data = imp2)
+
+ecd2_0.5_final=step(ecd2_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+ecd2_0.5_final$formula
+```
+
+Third
+```{r, warning=F}
+ecd3_0.5=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .5, data = imp3)
+
+ecd3_0.5_final=step(ecd3_0.5, trace=0, direction = "backward")
+
+AIC(ecd3_0.5_final)
+AIC(rq(formula = days28 ~ ecd + age + ethnicity + causeESKD + nzDep2006 + 
+    bmi + heartdisease + cerebrovascular + dialysisTime + ischemicTime + 
+    HLAmismatch + currentAntibodies + transplantYear + transplantCentre, tau = 0.5, data = imp3))
+```
+
+```{r}
+ecd3_0.5_final$formula
+```
+
+
+Fourth
+```{r, warning=F}
+ecd4_0.5=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .5, data = imp4)
+
+ecd4_0.5_final=step(ecd4_0.5, trace=0, direction = "backward")
+
+AIC(ecd4_0.5_final)
+AIC(rq(days28 ~ ecd + age + ethnicity + causeESKD + nzDep2006 + bmi + 
+    heartdisease + dialysisTime + ischemicTime + HLAmismatch + 
+    currentAntibodies + transplantYear + transplantCentre ,  tau = .5, data = imp4))
+```
+
+```{r}
+ecd4_0.5_final$formula
+```
+
+
+Fifth
+```{r, warning=F}
+ecd5_0.5=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .5, data = imp5)
+
+ecd5_0.5_final=step(ecd5_0.5, trace=0, direction = "backward")
+
+AIC(ecd5_0.5_final)
+AIC(rq(days28 ~ ecd + age + ethnicity + causeESKD + nzDep2006 + bmi + 
+    heartdisease + cerebrovascular + dialysisTime + ischemicTime + 
+    HLAmismatch + currentAntibodies + transplantYear + transplantCentre ,  tau = .5, data = imp5))
+```
+
+```{r}
+ecd5_0.5_final$formula
+```
+
+```{r}
+ecd_0.5_final=with(imp, rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+heartdisease+diabetes+cerebrovascular+dialysisTime+ischemicTime+HLAmismatch+currentAntibodies+relevel(transplantYear, ref = 4)+transplantCentre+relevel(transplantYear, ref = 4)*ecd, tau = .5))
+summary(pool(ecd_0.5_final), se="boot", R=5000)
+```
+
+```{r}
+-0.805154534 -qnorm(0.975)*0.969308842 
+-0.805154534 +qnorm(0.975)*0.969308842 
+
+-2.829338172  -qnorm(0.975)*1.936988537  
+-2.829338172  +qnorm(0.975)*1.936988537  
+
+-0.569952316  -qnorm(0.975)*1.075511541  
+-0.569952316  +qnorm(0.975)*1.075511541  
+
+0.091237154  -qnorm(0.975)*1.088071405 
+0.091237154 +qnorm(0.975)*1.088071405 
+```
+
+First for ECD 0.75
+```{r, warning=F}
+ecd1_0.75=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .75, data = imp1)
+
+ecd1_0.75_final=step(ecd1_0.75, trace=0, direction = "backward")
+
+summary(ecd1_0.75_final)
+```
+
+```{r}
+ecd1_0.75_final$formula
+```
+
+Second
+```{r, warning=F}
+ecd2_0.75=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .75, data = imp2)
+
+ecd2_0.75_final=step(ecd2_0.75, trace=0, direction = "backward")
+
+summary(ecd2_0.75_final)
+
+AIC(ecd2_0.75_final)
+
+ecd2_0.75_final$formula
+
+mod=rq(days28 ~ ecd + age + causeESKD + nzDep2006 + bmi + cerebrovascular + 
+    dialysisTime + ischemicTime + HLAmismatch + transplantYear + 
+    transplantCentre, tau = 0.75, data=imp2)
+AIC(mod)
+```
+
+```{r}
+ecd2_0.75_final$formula
+```
+
+Third
+```{r, warning=F}
+ecd3_0.75=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .75, data = imp3)
+
+ecd3_0.75_final=step(ecd3_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+ecd3_0.75_final$formula
+```
+
+
+Fourth
+```{r, warning=F}
+ecd4_0.75=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .75, data = imp4)
+
+ecd4_0.75_final=step(ecd4_0.75, trace=0, direction = "backward")
+
+summary(ecd4_0.75_final)
+```
+
+```{r}
+ecd4_0.75_final$formula
+```
+
+
+Fifth
+```{r, warning=F}
+ecd5_0.75=rq(days28~ecd+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ ecd*transplantYear+ecd*nzDep2006, tau = .75, data = imp5)
+
+ecd5_0.75_final=step(ecd5_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+ecd5_0.75_final$formula
+```
+
+
+```{r}
+ecd_0.75_final=with(imp, rq(days28 ~ ecd+age+male+causeESKD+nzDep2006+bmi+cerebrovascular+diabetes+dialysisTime+ischemicTime+HLAmismatch+transplantYear+transplantCentre+nzDep2006*ecd, tau=0.75))
+summary(pool(ecd_0.75_final), se="boot", R=5000)
+```
+
+```{r}
+-0.233922231-qnorm(0.975)*0.455214852
+-0.233922231+qnorm(0.975)*0.455214852
+
+-0.952522397-qnorm(0.975)*0.610813365  
+-0.952522397+qnorm(0.975)*0.610813365  
+
+0.345818259 -qnorm(0.975)*0.530472190   
+0.345818259 +qnorm(0.975)*0.530472190   
+```
+
+Final KDRI models with imputed datasets (First one)
+```{r, warning=F}
+KDRI1_0.5=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .5, data = imp1)
+
+KDRI1_0.5_final=step(KDRI1_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI1_0.5_final$formula
+```
+
+Second
+```{r, warning=F}
+KDRI2_0.5=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .5, data = imp2)
+
+KDRI2_0.5_final=step(KDRI2_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI2_0.5_final$formula
+```
+
+Third
+```{r, warning=F}
+KDRI3_0.5=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .5, data = imp3)
+
+KDRI3_0.5_final=step(KDRI3_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI3_0.5_final$formula
+```
+
+
+Fourth
+```{r, warning=F}
+KDRI4_0.5=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .5, data = imp4)
+
+KDRI4_0.5_final=step(KDRI4_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI4_0.5_final$formula
+```
+
+
+Fifth
+```{r, warning=F}
+KDRI5_0.5=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .5, data = imp5)
+
+KDRI5_0.5_final=step(KDRI5_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI5_0.5_final$formula
+```
+
+Full KDRI median model
+
+```{r}
+KDRI_0.5_final=with(imp, rq(days28 ~ KDRI+male+age+ethnicity+causeESKD+nzDep2006+bmi+heartdisease+cerebrovascular+diabetes+dialysisTime+ischemicTime+currentAntibodies+relevel(transplantYear, ref = 4)+transplantCentre+KDRI*relevel(transplantYear, ref = 4),tau=0.5))
+
+summary(pool(KDRI_0.5_final), se="boot", R="5000")
+```
+
+```{r}
+-1.613581468 -qnorm(0.975)*0.760213859
+-1.613581468 +qnorm(0.975)*0.760213859
+
+-3.289617060-qnorm(0.975)*1.484952724 
+-3.289617060+qnorm(0.975)*1.484952724 
+
+0.751629246 -qnorm(0.975)*0.992912171    
+0.751629246 +qnorm(0.975)*0.992912171    
+
+0.695081235 -qnorm(0.975)*0.966778660  
+0.695081235 +qnorm(0.975)*0.966778660  
+```
+
+First for KDRI 0.75
+```{r, warning=F}
+KDRI1_0.75=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .75, data = imp1)
+
+KDRI1_0.75_final=step(KDRI1_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI1_0.75_final$formula
+```
+
+Second
+```{r, warning=F}
+KDRI2_0.75=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .75, data = imp2)
+
+KDRI2_0.75_final=step(KDRI2_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI2_0.75_final$formula
+```
+
+Third
+```{r, warning=F}
+KDRI3_0.75=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .75, data = imp3)
+
+KDRI3_0.75_final=step(KDRI3_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI3_0.75_final$formula
+```
+
+
+Fourth
+```{r, warning=F}
+KDRI4_0.75=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .75, data = imp4)
+
+KDRI4_0.75_final=step(KDRI4_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI4_0.75_final$formula
+```
+
+
+Fifth
+```{r, warning=F}
+KDRI5_0.75=rq(days28~KDRI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDRI*transplantYear+KDRI*nzDep2006, tau = .75, data = imp5)
+
+KDRI5_0.75_final=step(KDRI5_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDRI5_0.75_final$formula
+```
+
+Final KDRI model, 75th percentile
+```{r}
+KDRI_0.75_final=with(imp, rq(days28 ~ KDRI+male+age+causeESKD+nzDep2006+bmi+diabetes+dialysisTime+HLAmismatch+transplantYear+transplantCentre,tau=0.75))
+
+summary(pool(KDRI_0.75_final), se="boot", R="5000")
+```
+
+```{r}
+-1.14202125-qnorm(0.975)*0.219554558
+-1.14202125+qnorm(0.975)*0.219554558
+```
+
+Final KDPI models with imputed datasets (First one)
+```{r, warning=F}
+KDPI1_0.5=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+KDPI*transplantYear+KDPI*nzDep2006, tau = .5, data = imp1)
+
+KDPI1_0.5_final=step(KDPI1_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI1_0.5_final$formula
+```
+
+Second
+```{r, warning=F}
+KDPI2_0.5=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+KDPI*transplantYear+KDPI*nzDep2006, tau = .5, data = imp2)
+
+KDPI2_0.5_final=step(KDPI2_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI2_0.5_final$formula
+```
+
+Third
+```{r, warning=F}
+KDPI3_0.5=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDPI*transplantYear+KDPI*nzDep2006, tau = .5, data = imp3)
+
+KDPI3_0.5_final=step(KDPI3_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI3_0.5_final$formula
+```
+
+
+Fourth
+```{r, warning=F}
+KDPI4_0.5=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDPI*transplantYear+KDPI*nzDep2006, tau = .5, data = imp4)
+
+KDPI4_0.5_final=step(KDPI4_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI4_0.5_final$formula
+```
+
+
+Fifth
+```{r, warning=F}
+KDPI5_0.5=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDPI*transplantYear+KDPI*nzDep2006, tau = .5, data = imp5)
+
+KDPI5_0.5_final=step(KDPI5_0.5, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI5_0.5_final$formula
+```
+
+Final for KDPI median
+
+```{r}
+KDPI_0.5_final=with(imp, rq(days28 ~ (KDPI>85)+male+age+ethnicity+causeESKD+nzDep2006+bmi+heartdisease+dialysisTime+currentAntibodies+relevel(transplantYear, ref = 4)+transplantCentre+(KDPI>85)*relevel(transplantYear, ref = 4),tau=0.5))
+
+summary(pool(KDPI_0.5_final), se="boot", R="5000")
+```
+
+```{r}
+-2.342982526 -qnorm(0.975)*0.583959762  
+-2.342982526 +qnorm(0.975)*0.583959762  
+
+-1.219093563  -qnorm(0.975)*2.228510343   
+-1.219093563 +qnorm(0.975)*2.228510343   
+
+1.992044760 -qnorm(0.975)*0.842308232      
+1.992044760 +qnorm(0.975)*0.842308232      
+
+2.374378455  -qnorm(0.975)*0.840272871    
+2.374378455  +qnorm(0.975)*0.840272871    
+```
+
+First for KDPI 0.75
+```{r, warning=F}
+KDPI1_0.75=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDPI*transplantYear+KDPI*nzDep2006, tau = .75, data = imp1)
+
+KDPI1_0.75_final=step(KDPI1_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI1_0.75_final$formula
+```
+
+Second
+```{r, warning=F}
+KDPI2_0.75=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDPI*transplantYear+KDPI*nzDep2006, tau = .75, data = imp2)
+
+KDPI2_0.75_final=step(KDPI2_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI2_0.75_final$formula
+```
+
+Third
+```{r, warning=F}
+KDPI3_0.75=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDPI*transplantYear+KDPI*nzDep2006, tau = .75, data = imp3)
+
+KDPI3_0.75_final=step(KDPI3_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI3_0.75_final$formula
+```
+
+
+Fourth
+```{r, warning=F}
+KDPI4_0.75=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDPI*transplantYear+KDPI*nzDep2006, tau = .75, data = imp4)
+
+KDPI4_0.75_final=step(KDPI4_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI4_0.75_final$formula
+```
+
+
+Fifth
+```{r, warning=F}
+KDPI5_0.75=rq(days28~KDPI+age+male+ethnicity+causeESKD+nzDep2006+bmi+smoking+heartdisease+peripheralvasc+diabetes+cerebrovascular+lungdisease+dialysisTime+lastTreatment+ischemicTime+HLAmismatch+currentAntibodies+dual+transplantYear+transplantCentre+ KDPI*transplantYear+KDPI*nzDep2006, tau = .75, data = imp5)
+
+KDPI5_0.75_final=step(KDPI5_0.75, trace=0, direction = "backward")
+```
+
+```{r}
+KDPI5_0.75_final$formula
+```
+
+```{r}
+KDPI_0.75_final=with(imp, rq(days28 ~ (KDPI>85)+male+age+causeESKD+nzDep2006+bmi+dialysisTime+HLAmismatch+transplantYear+transplantCentre,tau=0.75))
+
+summary(pool(KDPI_0.75_final), se="boot", R="5000")
+```
+
+```{r}
+-0.87245659-qnorm(0.975)*0.273187912 
+-0.87245659+qnorm(0.975)*0.273187912 
+```
